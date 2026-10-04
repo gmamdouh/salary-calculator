@@ -18,4 +18,16 @@ function payrollRules(overrides = {}) {
     MANAGEMENT: { before: { basic: 21000, abs: 0 }, after: { basic: 27000, abs: 0 } }
   }, salesQuarterlyPaymentMonths: [3, 6, 9, 12], ...overrides };
 }
-module.exports = { employee, rules, decisionSet, periodOptions, attendance, probationDecision, benefitLedger, payrollRules };
+function mappingConfig(overrides = {}) {
+  return { department: 'SURVEY', spreadsheetId: 'fixture-source', leaveSpreadsheetId: 'fixture-leave',
+    employeeTab: 'Team', attendanceTab: 'Days', employeeHeaderRow: 2, attendanceHeaderRow: 1,
+    employeeColumns: { employeeId: 'ID', americanName: 'Alias', realName: 'Legal', firstWorkingDay: 'Joined', lastWorkingDay: 'Left', transfers: 'Count' },
+    attendanceColumns: { employeeId: 'ID', date: 'Day', status: 'Code' },
+    approvalColumns: { runId: 'Run', paid: 'Paid' }, ...overrides };
+}
+function sourceRow(overrides = {}) {
+  return { headers: ['ID', 'Alias', 'Legal', 'Joined', 'Left', 'Count', 'Run', 'Paid'],
+    values: ['EMP-001', 'Alex Smith', 'Internal Name', '2026-01-01', '', 10, '', ''],
+    displayValues: ['EMP-001', 'Alex Smith', 'Internal Name', '2026-01-01', '', '10', '', ''], rowNumber: 3, ...overrides };
+}
+module.exports = { employee, rules, decisionSet, periodOptions, attendance, probationDecision, benefitLedger, payrollRules, mappingConfig, sourceRow };
