@@ -64,6 +64,15 @@ SalaryCalculator.Contracts = (function () {
     return record;
   }
   return {
+    assertRun: function (run) {
+      assertObject(run, 'run');
+      assertKnownValues(run, 'run');
+      ['runId', 'rulesVersion', 'createdBy', 'payrollMonth', 'cutoff'].forEach(function (key) { assertText(run[key], key); });
+      if (!Number.isSafeInteger(run.version) || run.version < 1) throw new Error('version must be a positive integer');
+      assertObject(run.sourceSnapshot, 'sourceSnapshot');
+      if (!Array.isArray(run.results) || !run.results.length) throw new Error('results are required');
+      return run;
+    },
     assertEmployee: assertEmployee,
     assertRules: function (rules) { return assertOpenRecord(rules, 'rules'); },
     assertDecisionSet: function (decisions) { return assertOpenRecord(decisions, 'decisions'); }

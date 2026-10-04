@@ -30,4 +30,13 @@ function sourceRow(overrides = {}) {
     values: ['EMP-001', 'Alex Smith', 'Internal Name', '2026-01-01', '', 10, '', ''],
     displayValues: ['EMP-001', 'Alex Smith', 'Internal Name', '2026-01-01', '', '10', '', ''], rowNumber: 3, ...overrides };
 }
-module.exports = { employee, rules, decisionSet, periodOptions, attendance, probationDecision, benefitLedger, payrollRules, mappingConfig, sourceRow };
+function runRecord(overrides = {}) {
+  return { runId: 'RUN-001', version: 1, payrollMonth: '2026-09', cutoff: '2026-09-30',
+    departmentScope: ['SURVEY'], rulesVersion: 'rules-v1', createdBy: 'hr@example.test',
+    sourceSnapshot: { employeeRows: [sourceRow()] }, inputs: [employee()], decisions: {},
+    sourceConfigs: [mappingConfig()], warnings: [], acknowledgements: [],
+    results: [{ employeeId: 'EMP-001', department: 'SURVEY', payrollMonth: '2026-09',
+      components: { basic: { calculatedAmount: 15000, amount: 15000 }, probation: { calculatedAmount: 12000, amount: 12000 }, referral: { calculatedAmount: 0, amount: 0 }, deductions: { calculatedAmount: 0, amount: 0 } },
+      total: 27000, warnings: [], benefitCandidates: [{ eligible: true, amount: 12000, benefitKey: 'PROBATION:EMP-001' }] }], ...overrides };
+}
+module.exports = { employee, rules, decisionSet, periodOptions, attendance, probationDecision, benefitLedger, payrollRules, mappingConfig, sourceRow, runRecord };
