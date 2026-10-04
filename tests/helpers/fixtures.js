@@ -5,4 +5,5 @@ function employee(overrides = {}) {
 }
 function rules(overrides = {}) { return { ...overrides }; }
 function decisionSet(overrides = {}) { return { ...overrides }; }
-module.exports = { employee, rules, decisionSet };
+function periodOptions(overrides = {}) { return { payrollMonth: '2026-09', cutoffMode: 'MONTH_END', today: '2026-10-04', ...overrides }; }
+module.exports = { employee, rules, decisionSet, periodOptions };
