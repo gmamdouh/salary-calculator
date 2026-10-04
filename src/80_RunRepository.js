@@ -22,6 +22,17 @@ SalaryCalculator.RunRepository = (function () {
       if (!run) throw new Error('Unknown run: ' + runId);
       return copy(run);
     }
+    function hasFinalBenefit(result, type) {
+      var componentName = type === 'PROBATION' ? 'probation' : 'referral';
+      var component = result.components && result.components[componentName];
+      if (!component || !(component.amount > 0)) return false;
+      return (result.benefitCandidates || []).some(function (candidate) {
+        if (!candidate || candidate.eligible !== true || typeof candidate.benefitKey !== 'string') return false;
+        var parts = candidate.benefitKey.split(':');
+        if (type === 'PROBATION') return candidate.benefitKey === 'PROBATION:' + result.employeeId;
+        return parts.length === 3 && parts[0] === 'REFERRAL' && parts[1] === result.employeeId;
+      });
+    }
     function benefitKey(type, employeeId, relatedEmployeeId) {
       type = String(type || '').toUpperCase();
       text(employeeId, 'Employee ID');
@@ -51,7 +62,9 @@ SalaryCalculator.RunRepository = (function () {
             else if (field === 'approvedBy') values[field] = checkpoint.approvedBy;
             else if (field === 'approvedAt') values[field] = checkpoint.approvedAt;
             else if (field === 'status') values[field] = 'APPROVED';
-            else values[field] = false;
+            else if (field === 'paid' && result.salesAccrual && result.salesAccrual.paid === true && result.components.abs && result.components.abs.amount > 0) values[field] = true;
+            else if (field === 'probationPaid' && hasFinalBenefit(result, 'PROBATION')) values[field] = true;
+            else if (field === 'referralPaid' && hasFinalBenefit(result, 'REFERRAL')) values[field] = true;
           });
           writes.push({ employeeId: result.employeeId, values: values });
         });
@@ -67,6 +80,8 @@ SalaryCalculator.RunRepository = (function () {
             (parts[0] === 'REFERRAL' && parts.length === 3 ? benefitKey('REFERRAL', parts[1], parts[2]) : null);
           if (!expected || key !== expected) throw new Error('Invalid eligible benefit key: ' + key);
           if (typeof candidate.amount !== 'number' || !Number.isFinite(candidate.amount) || candidate.amount < 0) throw new Error('Invalid benefit amount');
+          var finalAmount = parts[0] === 'PROBATION' ? result.components.probation.amount : result.components.referral.amount;
+          if (!(finalAmount > 0)) return;
           gateway.appendUnique(TABLES.benefits, key, { benefitKey: key, type: parts[0], employeeId: result.employeeId,
             relatedEmployeeId: parts[0] === 'REFERRAL' ? parts[2] : null, amount: candidate.amount,
             payrollMonth: run.payrollMonth, runId: run.runId, paid: false });
@@ -77,54 +92,74 @@ SalaryCalculator.RunRepository = (function () {
       return copy(run.approvalCheckpoint.result || { valid: true, state: 'APPROVED', runId: run.runId,
         approvedBy: run.approvedBy, approvedAt: run.approvedAt, writeBackStatus: run.writeBackStatus });
     }
+    function writeSourceState(run) {
+      var checkpoint = run.approvalCheckpoint, adapter = dependencies.sourceGateway || SalaryCalculator.SpreadsheetGateway;
+      if (!checkpoint || !Array.isArray(checkpoint.sourceWrites)) throw new Error('Approval checkpoint has no saved source write set');
+      (run.sourceConfigs || []).forEach(function (config) {
+        var writes = checkpoint.sourceWrites.filter(function (write) {
+          return run.results.some(function (result) { return result.employeeId === write.employeeId && result.department === config.department; });
+        });
+        if (!writes.length) return;
+        var outcome = adapter.writeApprovalState(config, writes);
+        if (!outcome || outcome.valid !== true) {
+          var error = new Error('Source approval write-back failed');
+          error.issues = outcome && outcome.errors || [];
+          throw error;
+        }
+      });
+    }
+    function failedWriteBack(run, error) {
+      run.writeBackStatus = 'FAILED';
+      run.approvalCheckpoint.lastWriteBackError = copy(error.issues || [{ code: 'WRITE_ERROR', message: error.message }]);
+      gateway.upsert(TABLES.runs, run.runId, run);
+      return { valid: false, resumable: true, state: run.state, runId: run.runId,
+        writeBackStatus: 'FAILED', errors: copy(run.approvalCheckpoint.lastWriteBackError) };
+    }
     function approve(runId, approver) {
       text(approver, 'Approver');
       return locked(function () {
         var run = getRun(runId);
-        if (run.state === 'APPROVED' || run.state === 'SUPERSEDED') {
-          appendBenefits(run);
-          if (run.state === 'APPROVED') {
-            gateway.appendUnique(TABLES.history, runId + ':APPROVED', run);
-            run.results.forEach(function (result) {
-              gateway.upsert(TABLES.latest, result.employeeId, { runId: run.runId, payrollMonth: run.payrollMonth,
-                state: 'APPROVED', result: result, approvedAt: run.approvedAt });
-            });
+        if (run.state === 'SUPERSEDED' || (run.state === 'APPROVED' && run.writeBackStatus === 'COMPLETE')) return approvalResult(run);
+        if (run.state === 'APPROVED') {
+          try {
+            writeSourceState(run);
+          } catch (error) {
+            return failedWriteBack(run, error);
           }
+          run.writeBackStatus = 'COMPLETE';
+          run.approvalCheckpoint.result = { valid: true, state: 'APPROVED', runId: runId,
+            approvedBy: run.approvedBy, approvedAt: run.approvedAt, writeBackStatus: 'COMPLETE' };
+          gateway.upsert(TABLES.runs, runId, run);
           return approvalResult(run);
         }
         if (run.state !== 'DRAFT') throw new Error('Only a draft can be approved');
+        var resuming = !!run.approvalCheckpoint;
         if (!run.approvalCheckpoint) {
           run.approvalCheckpoint = { state: 'APPROVING', approvedBy: approver, approvedAt: now() };
           run.writeBackStatus = 'PENDING';
           sourceWrites(run, run.approvalCheckpoint);
           gateway.upsert(TABLES.runs, runId, run);
         }
-        // Reconcile idempotent checkpoint and benefit records on every retry.
-        gateway.appendUnique(TABLES.history, runId + ':APPROVAL_CHECKPOINT', run);
-        appendBenefits(run);
+        // Mark each durable prerequisite after its idempotent write so a retry
+        // can repair a crash between the checkpoint and the external write-back.
+        if (run.approvalCheckpoint.historyWritten !== true) {
+          gateway.appendUnique(TABLES.history, runId + ':APPROVAL_CHECKPOINT', run);
+          run.approvalCheckpoint.historyWritten = true;
+          gateway.upsert(TABLES.runs, runId, run);
+        }
+        if (run.approvalCheckpoint.benefitsWritten !== true) {
+          appendBenefits(run);
+          run.approvalCheckpoint.benefitsWritten = true;
+          gateway.upsert(TABLES.runs, runId, run);
+        }
         // Persist the exact source write set before attempting external writes.
         gateway.upsert(TABLES.runs, runId, run);
-        var checkpoint = run.approvalCheckpoint, adapter = dependencies.sourceGateway || SalaryCalculator.SpreadsheetGateway;
         try {
-          (run.sourceConfigs || []).forEach(function (config) {
-            var writes = checkpoint.sourceWrites.filter(function (write) {
-              return run.results.some(function (result) { return result.employeeId === write.employeeId && result.department === config.department; });
-            });
-            if (!writes.length) return;
-            var outcome = adapter.writeApprovalState(config, writes);
-            if (!outcome || outcome.valid !== true) {
-              var error = new Error('Source approval write-back failed');
-              error.issues = outcome && outcome.errors || [];
-              throw error;
-            }
-          });
+          writeSourceState(run);
         } catch (error) {
-          run.writeBackStatus = 'FAILED';
-          run.approvalCheckpoint.lastWriteBackError = copy(error.issues || [{ code: 'WRITE_ERROR', message: error.message }]);
-          gateway.upsert(TABLES.runs, runId, run);
-          return { valid: false, resumable: true, state: 'DRAFT', runId: runId,
-            writeBackStatus: 'FAILED', errors: copy(run.approvalCheckpoint.lastWriteBackError) };
+          return failedWriteBack(run, error);
         }
+        var checkpoint = run.approvalCheckpoint;
         run.writeBackStatus = 'COMPLETE';
         run.state = 'APPROVED';
         run.approvedBy = checkpoint.approvedBy;
@@ -133,7 +168,7 @@ SalaryCalculator.RunRepository = (function () {
           approvedBy: run.approvedBy, approvedAt: run.approvedAt, writeBackStatus: 'COMPLETE' };
         gateway.appendUnique(TABLES.history, runId + ':APPROVED', run);
         gateway.upsert(TABLES.runs, runId, run);
-        run.results.forEach(function (result) {
+        if (!resuming) run.results.forEach(function (result) {
           gateway.upsert(TABLES.latest, result.employeeId, { runId: run.runId, payrollMonth: run.payrollMonth,
             state: 'APPROVED', result: result, approvedAt: run.approvedAt });
         });

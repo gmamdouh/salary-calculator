@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { loadAppsScript } = require('./helpers/load-apps-script');
-const { runRecord } = require('./helpers/fixtures');
+const { runRecord, mappingConfig, employee } = require('./helpers/fixtures');
 const plain = value => JSON.parse(JSON.stringify(value));
 // Repository adapter: read(table,key), upsert(table,key,record),
 // appendUnique(table,key,record), list(table); all records are JSON snapshots.
@@ -82,6 +82,18 @@ test('approval is immutable and retry returns the same approval without duplicat
   assert.ok(events.findIndex(event => event[0] === 'append' && event[1] === 'Payment Ledger') < sourceIndex);
   assert.equal(isLocked(), false);
 });
+test('approval only sets paid markers for positive final-run payments and leaves other markers untouched', () => {
+  const { repository, events } = harness();
+  const input = runRecord({ sourceConfigs: [mappingConfig({ approvalColumns: {
+    runId: 'Run', paid: 'Paid', probationPaid: 'Probation Paid', referralPaid: 'Referral Paid', status: 'Status'
+  } })] });
+  repository.createDraft(input);
+  repository.approve('RUN-001', 'approver');
+  const write = events.find(event => event[0] === 'source')[2][0].values;
+  assert.equal(write.probationPaid, true);
+  assert.equal(Object.prototype.hasOwnProperty.call(write, 'paid'), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(write, 'referralPaid'), false);
+});
 test('failed source write-back keeps a frozen checkpoint and retry completes without duplicate ledger writes', () => {
   const { repository, gateway, state } = harness();
   repository.createDraft(runRecord());
@@ -111,6 +123,65 @@ test('two approval calls through the document lock produce one durable approval 
   assert.equal(events.filter(event => event[0] === 'source').length, 1);
   assert.equal(events.filter(event => event[0] === 'append' && event[1] === 'Payment Ledger').length, 1);
   assert.equal(events.filter(event => event[0] === 'append' && event[1] === 'Payroll History' && event[2] === 'RUN-001:APPROVED').length, 1);
+});
+test('completed approval retry does not replace a newer latest result or write again', () => {
+  const { repository, gateway, events } = harness();
+  repository.createDraft(runRecord());
+  const first = repository.approve('RUN-001', 'approver');
+  repository.createDraft(runRecord({ runId: 'RUN-002', version: 2 }));
+  repository.approve('RUN-002', 'approver');
+  const latestBeforeRetry = gateway.read('Latest Results', 'EMP-001');
+  const eventsBeforeRetry = events.length;
+  const retry = repository.approve('RUN-001', 'another-approver');
+  assert.deepEqual(plain(retry), plain(first));
+  assert.deepEqual(gateway.read('Latest Results', 'EMP-001'), latestBeforeRetry);
+  assert.equal(events.length, eventsBeforeRetry);
+});
+test('incomplete approved write-back resumes only the source step without ledger or latest writes', () => {
+  const { repository, gateway, events } = harness();
+  repository.createDraft(runRecord());
+  repository.approve('RUN-001', 'approver');
+  const run = repository.getRun('RUN-001');
+  run.writeBackStatus = 'FAILED';
+  gateway.upsert('Payroll Runs', run.runId, run);
+  repository.createDraft(runRecord({ runId: 'RUN-002', version: 2 }));
+  repository.approve('RUN-002', 'approver');
+  const latestBeforeRetry = gateway.read('Latest Results', 'EMP-001');
+  const eventsBeforeRetry = events.slice();
+  const resumed = repository.approve('RUN-001', 'another-approver');
+  assert.equal(resumed.valid, true);
+  assert.deepEqual(gateway.read('Latest Results', 'EMP-001'), latestBeforeRetry);
+  assert.equal(events.slice(eventsBeforeRetry.length).filter(event => event[0] === 'source').length, 1);
+  assert.equal(events.slice(eventsBeforeRetry.length).some(event => event[0] === 'append' || (event[0] === 'upsert' && (event[1] === 'Latest Results' || event[1] === 'Payment Ledger'))), false);
+});
+test('failed draft checkpoint retry does not replace a newer latest result or reappend payment rows', () => {
+  const { repository, gateway, events, state } = harness();
+  repository.createDraft(runRecord());
+  state.failSource = true;
+  repository.approve('RUN-001', 'approver');
+  state.failSource = false;
+  repository.createDraft(runRecord({ runId: 'RUN-002', version: 2 }));
+  repository.approve('RUN-002', 'approver');
+  const latestBeforeRetry = gateway.read('Latest Results', 'EMP-001');
+  const eventCountBeforeRetry = events.length;
+  repository.approve('RUN-001', 'another-approver');
+  assert.deepEqual(gateway.read('Latest Results', 'EMP-001'), latestBeforeRetry);
+  assert.equal(events.slice(eventCountBeforeRetry).some(event => event[0] === 'upsert' && event[1] === 'Latest Results'), false);
+  assert.equal(events.slice(eventCountBeforeRetry).some(event => event[0] === 'append' && event[1] === 'Payment Ledger'), false);
+  assert.equal(gateway.list('Payment Ledger').length, 1);
+});
+test('probation override to zero leaves its one-time benefit eligible for a later run', () => {
+  const { repository, events } = harness();
+  repository.createDraft(runRecord({ sourceConfigs: [mappingConfig({ approvalColumns: {
+    runId: 'Run', probationPaid: 'Probation Paid'
+  } })] }));
+  repository.applyOverride('RUN-001', 'EMP-001', 'probation', 0, 'Do not pay this cycle', 'editor');
+  repository.approve('RUN-001', 'approver');
+  assert.equal(repository.hasBenefit('PROBATION:EMP-001'), false);
+  const sourceValues = events.find(event => event[0] === 'source')[2][0].values;
+  assert.equal(Object.prototype.hasOwnProperty.call(sourceValues, 'probationPaid'), false);
+  const { Eligibility } = loadAppsScript();
+  assert.equal(Eligibility.evaluateProbationPayment(employee(), [], { asOfDate: '2026-10-01', approved: true }).eligible, true);
 });
 test('superseded run versions remain readable after replacement approval', () => {
   const { repository, gateway } = harness();
