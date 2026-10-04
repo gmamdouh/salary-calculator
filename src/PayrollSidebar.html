@@ -21,6 +21,7 @@
         <label>Payroll month <input id="payrollMonth" type="month" required></label>
         <label>Cutoff <select id="cutoffMode"><option value="TODAY">Through today</option><option value="MONTH_END">Month end</option></select></label>
         <label>Department <select id="department"><option value="ALL">All</option><option>SURVEY</option><option>RESERVATIONS</option><option>SALES</option><option>TDS</option><option>MANAGEMENT</option></select></label>
+        <label>Holiday <select id="holidayId"><option value="">Choose a holiday when one applies</option></select></label>
         <button type="button" id="loadSetup">Load setup</button>
       </section>
       <section class="panel" id="panel-validate" data-panel="validate" hidden><h2>Validate</h2><div id="validationSummary"></div><button type="button" id="validateRun">Validate sources</button></section>
@@ -30,6 +31,7 @@
         <label>Search employees <input id="employeeSearch" type="search" autocomplete="off"></label>
         <div class="bulk-actions"><button type="button" id="selectAllSurvey">Select All Survey</button><button type="button" id="selectAllReservations">Select All Reservations</button></div>
         <div id="employeeList" class="employee-list"></div>
+        <div id="eligibilityDecisions"></div>
         <label>Paste American names <textarea id="pastedNames" rows="4" placeholder="One American name per line"></textarea></label>
         <button type="button" id="matchPastedNames">Match pasted names</button>
         <label>Upload screenshot <input id="holidayScreenshot" type="file" accept="image/*"></label>

@@ -7,7 +7,7 @@
         return { id: attempt.id, evidenceId: attempt.evidenceId, matches: attempt.matches.map(function (match) {
           return { americanName: match.americanName, employeeId: match.employeeId, confirmed: match.confirmed };
         }), manualIssues: attempt.manualIssues.map(function (issue) { return { kind: issue.kind,
-          candidates: issue.candidates, resolved: issue.resolved }; }), warnings: attempt.warnings };
+          candidates: issue.candidates, resolved: issue.resolved, employeeIds: (issue.employeeIds || []).slice() }; }), warnings: attempt.warnings };
       }
       return {
         add: function (report, evidenceId) {
@@ -34,6 +34,7 @@
           var attempt = find(attemptId), issue = attempt && attempt.manualIssues[issueIndex], ids = (selectedEmployeeIds || []).map(String);
           if (!issue || issue.resolved || !ids.length) return [];
           issue.resolved = true;
+          issue.employeeIds = ids.slice();
           return ids;
         },
         unresolvedCount: function () {
@@ -50,7 +51,7 @@
 <script>
   (function () {
     var ocrAttempts = PayrollSidebarOcrAttemptTracker.create();
-    var state = { setup: null, validation: null, employees: [], selected: {},
+    var state = { setup: null, validation: null, employees: [], selected: {}, employeeDecisions: {},
       confirmedOcrIds: [], evidenceIds: [], decisions: null, draft: null, blockingErrors: [], unresolvedDecisions: 0,
       validationUnresolvedCount: 0 };
     var byId = function (id) { return document.getElementById(id); };
@@ -60,6 +61,18 @@
     }
     function clearError() { var box = byId('errors'); box.hidden = true; box.textContent = ''; }
     function setStatus(message) { byId('status').textContent = message || ''; }
+    function renderHolidays() {
+      var selector = byId('holidayId'), month = byId('payrollMonth').value;
+      selector.textContent = '';
+      var empty = document.createElement('option'); empty.value = ''; empty.textContent = 'Choose a holiday when one applies'; selector.appendChild(empty);
+      (state.setup && state.setup.holidays || []).filter(function (holiday) {
+        return (holiday.actualHolidayDates || []).some(function (date) { return date.slice(0, 7) === month; });
+      }).forEach(function (holiday) {
+        var option = document.createElement('option'); option.value = holiday.holidayId;
+        option.textContent = holiday.name + ' · ' + holiday.actualHolidayDates.join(', ');
+        selector.appendChild(option);
+      });
+    }
     function invokeServer(name, value) {
       return new Promise(function (resolve, reject) {
         var runner = google.script.run.withSuccessHandler(resolve).withFailureHandler(function (error) { reject(error); });
@@ -90,6 +103,27 @@
     function selectDepartment(department) {
       state.employees.filter(function (employee) { return employee.department === department; }).forEach(function (employee) { state.selected[employee.employeeId] = true; });
       renderEmployees(); updateManualResolveButtons();
+    }
+    function renderEligibilityDecisions(requirements) {
+      var container = byId('eligibilityDecisions'); container.textContent = '';
+      state.employeeDecisions = {};
+      (requirements || []).forEach(function (requirement) {
+        var row = document.createElement('label'), select = document.createElement('select');
+        row.appendChild(document.createTextNode(requirement.americanName + ' · Probation payment (' + requirement.candidateDate + ') '));
+        [['', 'Choose'], ['APPROVED', 'Approve'], ['DECLINED', 'Decline']].forEach(function (item) {
+          var option = document.createElement('option'); option.value = item[0]; option.textContent = item[1]; select.appendChild(option);
+        });
+        select.addEventListener('change', function () {
+          if (select.value === 'APPROVED' || select.value === 'DECLINED') {
+            state.employeeDecisions[requirement.employeeId] = { probation: { approved: select.value === 'APPROVED' } };
+          } else delete state.employeeDecisions[requirement.employeeId];
+          state.validationUnresolvedCount = (requirements || []).filter(function (item) { return !state.employeeDecisions[item.employeeId]; }).length;
+          updateUnresolved();
+        });
+        row.appendChild(select); container.appendChild(row);
+      });
+      state.validationUnresolvedCount = (requirements || []).length;
+      updateUnresolved();
     }
     function showMatches(report, evidenceId) {
       report = report || {};
@@ -147,9 +181,11 @@
     }
     function recordFailedAttempt() { showMatches({ matches: [], ambiguous: [], unmatched: [{ status: 'ERROR' }] }); }
     function decisionPayload() {
-      return { holidayWork: { holidayId: state.setup && state.setup.holidayId || '', applies: byId('holidayApplies').checked,
+      return { holidayWork: { holidayId: byId('holidayId').value, applies: byId('holidayApplies').checked,
         employeeIds: selectedIds(), evidenceIds: state.evidenceIds },
-        ocr: { unresolvedCount: state.unresolvedDecisions, confirmedEmployeeIds: state.confirmedOcrIds } };
+        employeeDecisions: state.employeeDecisions,
+        ocr: { unresolvedCount: state.unresolvedDecisions, confirmedEmployeeIds: state.confirmedOcrIds,
+          attempts: ocrAttempts.attempts() } };
     }
     function missingOverrideReasons() {
       return Array.prototype.some.call(document.querySelectorAll('[data-amount]'), function (input) {
@@ -182,16 +218,17 @@
       invokeServer('getRunSetup').then(function (setup) {
         state.setup = setup || {}; var previous = new Date(); previous.setMonth(previous.getMonth() - 1);
         byId('payrollMonth').value = setup.payrollMonth || previous.toISOString().slice(0, 7);
-        state.employees = setup.employees || []; goTo('validate'); setStatus('Setup loaded.');
+        state.employees = setup.employees || []; renderHolidays(); goTo('validate'); setStatus('Setup loaded.');
       }).catch(function (error) { showError(error.message || error); setStatus(''); });
     });
+    byId('payrollMonth').addEventListener('change', renderHolidays);
     byId('validateRun').addEventListener('click', function () {
       clearError(); setStatus('Validating sources…');
       var request = { payrollMonth: byId('payrollMonth').value, cutoffMode: byId('cutoffMode').value, departmentScope: [byId('department').value] };
       invokeServer('validateRun', request).then(function (result) {
         state.validation = result || {}; state.employees = result.employees || state.employees;
         state.blockingErrors = result.errors || result.blockingErrors || [];
-        state.validationUnresolvedCount = result.unresolvedDecisionCount || 0; updateUnresolved();
+        renderEligibilityDecisions(result.decisionRequirements || []);
         byId('validationSummary').textContent = state.blockingErrors.length ? 'Blocking validation errors: ' + state.blockingErrors.length : 'Sources validated.';
         if (state.blockingErrors.length) showError(state.blockingErrors); else { renderEmployees(); goTo('decisions'); }
         setStatus('');
@@ -201,7 +238,11 @@
     byId('selectAllSurvey').addEventListener('click', function () { selectDepartment('SURVEY'); });
     byId('selectAllReservations').addEventListener('click', function () { selectDepartment('RESERVATIONS'); });
     byId('matchPastedNames').addEventListener('click', function () {
-      clearError(); invokeServer('matchHolidayNames', byId('pastedNames').value).then(function (report) { showMatches(report); })
+      clearError(); invokeServer('matchHolidayNames', { text: byId('pastedNames').value,
+        runId: state.validation && state.validation.runId }).then(function (report) {
+        if (report && report.evidenceId) state.evidenceIds.push(report.evidenceId);
+        showMatches(report, report && report.evidenceId);
+      })
         .catch(function (error) { showError(error.message || error); recordFailedAttempt(); });
     });
     byId('uploadScreenshot').addEventListener('click', function () {
@@ -212,6 +253,7 @@
         invokeServer('processHolidayScreenshot', { runId: state.validation && state.validation.runId,
           imageData: reader.result, fileName: file.name, contentType: file.type }).then(function (result) {
           if (result.evidence && result.evidence.evidenceId) state.evidenceIds.push(result.evidence.evidenceId);
+          if (result.auditEvidence && result.auditEvidence.evidenceId) state.evidenceIds.push(result.auditEvidence.evidenceId);
           showMatches(result.matchReport, result.evidence && result.evidence.evidenceId); setStatus('');
         }).catch(function (error) { showError(error.message || error); recordFailedAttempt(); setStatus(''); });
       }; reader.onerror = function () { showError('The screenshot could not be read.'); recordFailedAttempt(); };
@@ -236,7 +278,7 @@
     });
     byId('calculateDraft').addEventListener('click', function () {
       clearError(); var request = { payrollMonth: byId('payrollMonth').value, cutoffMode: byId('cutoffMode').value,
-        departmentScope: [byId('department').value], decisions: state.decisions };
+        departmentScope: [byId('department').value], runId: state.validation && state.validation.runId, decisions: state.decisions };
       invokeServer('calculateDraft', request).then(renderDraft).catch(function (error) { showError(error.message || error); });
     });
     byId('saveDraftEdits').addEventListener('click', function () {
