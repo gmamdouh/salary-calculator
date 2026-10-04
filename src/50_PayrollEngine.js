@@ -9,7 +9,15 @@ SalaryCalculator.PayrollEngine = (function () {
     if (typeof value !== 'number' || !Number.isFinite(value) || (!signed && value < 0)) throw new Error(label + ' must be a finite ' + (signed ? '' : 'nonnegative ') + 'number');
     return value;
   }
-  function round(value) { return Math.sign(value) * Math.round((Math.abs(value) + Number.EPSILON) * 100) / 100; }
+  function round(value) {
+    // Shift the decimal representation, avoiding binary multiplication at half cents.
+    // Round the magnitude half up, then restore the sign (negative ties go away from zero).
+    function shift(number, places) {
+      var parts = String(number).split('e');
+      return Number(parts[0] + 'e' + ((parts[1] ? Number(parts[1]) : 0) + places));
+    }
+    return Math.sign(value) * shift(Math.round(shift(Math.abs(value), 2)), -2);
+  }
   function sumComponents(components) {
     return round(Object.keys(components).reduce(function (sum, name) {
       return sum + money(typeof components[name] === 'number' ? components[name] : components[name].amount, name, true);
@@ -89,7 +97,8 @@ SalaryCalculator.PayrollEngine = (function () {
       return result.amount;
     }
     eligibility.probation = Eligibility.evaluateProbationPayment(employee, benefitLedger,
-      Object.assign({ asOfDate: period.endDate }, decisions.probation || {}));
+      // HR confirms approval; eligibility timing belongs to this run's cutoff.
+      Object.assign({}, decisions.probation || {}, { asOfDate: period.endDate }));
     add('probation', benefit(eligibility.probation));
     var referrals = 0;
     (decisions.referrals || []).forEach(function (referred) {

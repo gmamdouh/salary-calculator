@@ -127,3 +127,23 @@ test('calculation preserves input snapshots and warns when probation confirmatio
   assert.equal(result.components.probation.amount, 0);
   assert.equal(result.benefitCandidates[0].benefitKey, 'PROBATION:EMP-001');
 });
+test('future HR decision dates cannot pay probation before the payroll cutoff', () => {
+  const result = run({ decisions: { probation: { approved: true, asOfDate: '2026-12-31' } } });
+  assert.equal(result.eligibility.probation.candidateDate, '2026-10-31');
+  assert.equal(result.eligibility.probation.candidate, false);
+  assert.equal(result.components.probation.amount, 0);
+  assert.equal(result.total, 14000);
+});
+test('positive and negative monetary half cents round half up consistently', () => {
+  for (const [value, expected] of [[0.005,0.01],[1.005,1.01],[10.075,10.08],[100.005,100.01]]) {
+    const result = run({ decisions: { additions: [{ amount: value, approved: true, reason: 'Half cent' }], deductions: [{ amount: value, reason: 'Half cent' }] } });
+    assert.equal(result.components.additions.amount, expected);
+    assert.equal(result.components.additions.calculatedAmount, expected);
+    assert.equal(result.components.deductions.amount, -expected);
+    assert.equal(app.PayrollEngine.sumComponents({ addition: value }), expected);
+    assert.equal(app.PayrollEngine.sumComponents({ deduction: -value }), -expected);
+    assert.equal(result.total, 14000);
+  }
+  const override = run({ decisions: { overrides: [{ component: 'deductions', value: -10.075, reason: 'Half cent', editor: 'HR', timestamp: '2026-10-04T12:00:00Z' }] } });
+  assert.equal(override.components.deductions.amount, -10.08);
+});
