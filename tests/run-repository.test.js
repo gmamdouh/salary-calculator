@@ -8,11 +8,15 @@ const plain = value => JSON.parse(JSON.stringify(value));
 function harness() {
   const tables = new Map(), events = [];
   let held = false;
-  const state = { failSource: false, onLock: null };
+  const state = { failSource: false, failLatestOnce: false, onLock: null };
   const table = name => { if (!tables.has(name)) tables.set(name, new Map()); return tables.get(name); };
   const gateway = {
     read: (name, key) => table(name).has(key) ? plain(table(name).get(key)) : null,
-    upsert(name, key, value) { events.push(['upsert', name, key]); table(name).set(key, plain(value)); },
+    upsert(name, key, value) {
+      events.push(['upsert', name, key]);
+      if (name === 'Latest Results' && state.failLatestOnce) { state.failLatestOnce = false; throw new Error('Injected latest-result failure'); }
+      table(name).set(key, plain(value));
+    },
     appendUnique(name, key, value) { if (!table(name).has(key)) { events.push(['append', name, key]); table(name).set(key, plain(value)); } },
     list: name => [...table(name).values()].map(plain)
   };
@@ -94,6 +98,14 @@ test('approval only sets paid markers for positive final-run payments and leaves
   assert.equal(Object.prototype.hasOwnProperty.call(write, 'paid'), false);
   assert.equal(Object.prototype.hasOwnProperty.call(write, 'referralPaid'), false);
 });
+test('approval skips an all-empty unpaid-marker write payload as a successful no-op', () => {
+  const { repository, events } = harness();
+  repository.createDraft(runRecord({ sourceConfigs: [mappingConfig({ approvalColumns: { paid: 'Paid' } })] }));
+  const result = repository.approve('RUN-001', 'approver');
+  assert.equal(result.valid, true);
+  assert.equal(result.writeBackStatus, 'COMPLETE');
+  assert.equal(events.some(event => event[0] === 'source'), false);
+});
 test('failed source write-back keeps a frozen checkpoint and retry completes without duplicate ledger writes', () => {
   const { repository, gateway, state } = harness();
   repository.createDraft(runRecord());
@@ -113,6 +125,24 @@ test('failed source write-back keeps a frozen checkpoint and retry completes wit
   assert.equal(repository.getRun('RUN-001').state, 'APPROVED');
   assert.equal(gateway.list('Payment Ledger').length, 1);
   assert.equal(gateway.list('Payroll History').filter(run => run.state === 'APPROVED').length, 1);
+  assert.equal(gateway.read('Latest Results', 'EMP-001').runId, 'RUN-001');
+});
+test('interrupted latest publication resumes its checkpointed projection without repeating approval writes', () => {
+  const { repository, gateway, events, state } = harness();
+  repository.createDraft(runRecord());
+  state.failLatestOnce = true;
+  assert.throws(() => repository.approve('RUN-001', 'approver'), /Injected latest-result failure/);
+  assert.equal(repository.getRun('RUN-001').approvalCheckpoint.latestStatus, 'PENDING');
+  const sourceWrites = events.filter(event => event[0] === 'source').length;
+  const historyRows = gateway.list('Payroll History').length;
+  const benefitRows = gateway.list('Payment Ledger').length;
+  const approval = repository.approve('RUN-001', 'another-approver');
+  assert.equal(approval.valid, true);
+  assert.equal(repository.getRun('RUN-001').approvalCheckpoint.latestStatus, 'COMPLETE');
+  assert.equal(gateway.read('Latest Results', 'EMP-001').runId, 'RUN-001');
+  assert.equal(events.filter(event => event[0] === 'source').length, sourceWrites);
+  assert.equal(gateway.list('Payroll History').length, historyRows);
+  assert.equal(gateway.list('Payment Ledger').length, benefitRows);
 });
 test('two approval calls through the document lock produce one durable approval write set', () => {
   const { repository, events } = harness();
@@ -169,6 +199,18 @@ test('failed draft checkpoint retry does not replace a newer latest result or re
   assert.equal(events.slice(eventCountBeforeRetry).some(event => event[0] === 'upsert' && event[1] === 'Latest Results'), false);
   assert.equal(events.slice(eventCountBeforeRetry).some(event => event[0] === 'append' && event[1] === 'Payment Ledger'), false);
   assert.equal(gateway.list('Payment Ledger').length, 1);
+});
+test('failed draft checkpoint retry replaces an older payroll month in Latest Results', () => {
+  const { repository, gateway, state } = harness();
+  repository.createDraft(runRecord({ runId: 'RUN-000', payrollMonth: '2026-08', version: 1 }));
+  repository.approve('RUN-000', 'approver');
+  repository.createDraft(runRecord({ runId: 'RUN-001', payrollMonth: '2026-09', version: 2 }));
+  state.failSource = true;
+  repository.approve('RUN-001', 'approver');
+  state.failSource = false;
+  repository.approve('RUN-001', 'another-approver');
+  assert.equal(gateway.read('Latest Results', 'EMP-001').runId, 'RUN-001');
+  assert.equal(gateway.read('Latest Results', 'EMP-001').payrollMonth, '2026-09');
 });
 test('probation override to zero leaves its one-time benefit eligible for a later run', () => {
   const { repository, events } = harness();

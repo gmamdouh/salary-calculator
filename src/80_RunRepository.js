@@ -97,7 +97,8 @@ SalaryCalculator.RunRepository = (function () {
       if (!checkpoint || !Array.isArray(checkpoint.sourceWrites)) throw new Error('Approval checkpoint has no saved source write set');
       (run.sourceConfigs || []).forEach(function (config) {
         var writes = checkpoint.sourceWrites.filter(function (write) {
-          return run.results.some(function (result) { return result.employeeId === write.employeeId && result.department === config.department; });
+          return write.values && Object.keys(write.values).length > 0 &&
+            run.results.some(function (result) { return result.employeeId === write.employeeId && result.department === config.department; });
         });
         if (!writes.length) return;
         var outcome = adapter.writeApprovalState(config, writes);
@@ -115,11 +116,42 @@ SalaryCalculator.RunRepository = (function () {
       return { valid: false, resumable: true, state: run.state, runId: run.runId,
         writeBackStatus: 'FAILED', errors: copy(run.approvalCheckpoint.lastWriteBackError) };
     }
+    function mayPublishLatest(run, employeeId) {
+      var latest = gateway.read(TABLES.latest, employeeId);
+      if (!latest || latest.runId === run.runId) return true;
+      if (latest.payrollMonth && run.payrollMonth && latest.payrollMonth !== run.payrollMonth) return latest.payrollMonth < run.payrollMonth;
+      var latestRun = latest.runId ? gateway.read(TABLES.runs, latest.runId) : null;
+      var latestVersion = Number.isSafeInteger(latest.version) ? latest.version : latestRun && latestRun.version;
+      if (Number.isSafeInteger(latestVersion) && Number.isSafeInteger(run.version) && latestVersion !== run.version) return latestVersion < run.version;
+      var latestAt = latest.approvedAt || (latestRun && latestRun.approvedAt);
+      if (typeof latestAt === 'string' && typeof run.approvedAt === 'string' && latestAt !== run.approvedAt) return latestAt < run.approvedAt;
+      return false;
+    }
+    function publishLatest(run) {
+      var status = run.approvalCheckpoint.latestWriteStatus || (run.approvalCheckpoint.latestWriteStatus = {});
+      run.approvalCheckpoint.latestStatus = 'PENDING';
+      gateway.upsert(TABLES.runs, run.runId, run);
+      run.results.forEach(function (result) {
+        if (mayPublishLatest(run, result.employeeId)) {
+          gateway.upsert(TABLES.latest, result.employeeId, { runId: run.runId, version: run.version,
+            payrollMonth: run.payrollMonth, state: 'APPROVED', result: result, approvedAt: run.approvedAt });
+          status[result.employeeId] = 'PUBLISHED';
+        } else status[result.employeeId] = 'SKIPPED_NEWER';
+        // Comparing the persisted latest row makes an interrupted write safe to repeat.
+        gateway.upsert(TABLES.runs, run.runId, run);
+      });
+      run.approvalCheckpoint.latestStatus = 'COMPLETE';
+      gateway.upsert(TABLES.runs, run.runId, run);
+    }
     function approve(runId, approver) {
       text(approver, 'Approver');
       return locked(function () {
         var run = getRun(runId);
-        if (run.state === 'SUPERSEDED' || (run.state === 'APPROVED' && run.writeBackStatus === 'COMPLETE')) return approvalResult(run);
+        if (run.state === 'SUPERSEDED') return approvalResult(run);
+        if (run.state === 'APPROVED' && run.writeBackStatus === 'COMPLETE') {
+          if (run.approvalCheckpoint && run.approvalCheckpoint.latestStatus === 'PENDING') publishLatest(run);
+          return approvalResult(run);
+        }
         if (run.state === 'APPROVED') {
           try {
             writeSourceState(run);
@@ -168,10 +200,7 @@ SalaryCalculator.RunRepository = (function () {
           approvedBy: run.approvedBy, approvedAt: run.approvedAt, writeBackStatus: 'COMPLETE' };
         gateway.appendUnique(TABLES.history, runId + ':APPROVED', run);
         gateway.upsert(TABLES.runs, runId, run);
-        if (!resuming) run.results.forEach(function (result) {
-          gateway.upsert(TABLES.latest, result.employeeId, { runId: run.runId, payrollMonth: run.payrollMonth,
-            state: 'APPROVED', result: result, approvedAt: run.approvedAt });
-        });
+        publishLatest(run);
         return approvalResult(run);
       });
     }
