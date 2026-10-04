@@ -141,6 +141,44 @@ SalaryCalculator.SpreadsheetGateway = (function () {
     return { readDepartment: readDepartment, validateAccess: validateAccess, writeApprovalState: writeApprovalState };
   }
   return { create: create,
+    createMaster: function () {
+      function writeRows(sheet, row, column, values) {
+        if (!Array.isArray(values) || !values.length) return 0;
+        sheet.getRange(row, column, values.length, values[0].length).setValues(values);
+        return values.length;
+      }
+      function clearRows(sheet, startRow, endRow, columns) {
+        var lastRow = Math.max(startRow, endRow || sheet.getLastRow());
+        if (lastRow >= startRow && columns > 0) sheet.getRange(startRow, 1, lastRow - startRow + 1, columns).clearContent();
+      }
+      function protectRange(sheet, row, column, rows, columns, description) {
+        var range = sheet.getRange(row, column, rows, columns), type = typeof SpreadsheetApp !== 'undefined' ? SpreadsheetApp.ProtectionType.RANGE : undefined;
+        var existing = sheet.getProtections ? sheet.getProtections(type) : [];
+        for (var index = 0; index < existing.length; index++) {
+          if (existing[index].getDescription && existing[index].getDescription() === description) return existing[index];
+        }
+        var protection = range.protect();
+        protection.setDescription(description);
+        protection.setWarningOnly(false);
+        return protection;
+      }
+      function protectSheet(sheet, description) {
+        var type = typeof SpreadsheetApp !== 'undefined' ? SpreadsheetApp.ProtectionType.SHEET : undefined;
+        var existing = sheet.getProtections ? sheet.getProtections(type) : [];
+        for (var index = 0; index < existing.length; index++) {
+          if (existing[index].getDescription && existing[index].getDescription() === description) return existing[index];
+        }
+        var protection = sheet.protect();
+        protection.setDescription(description);
+        protection.setWarningOnly(false);
+        return protection;
+      }
+      function format(sheet, row, column, rows, columns, pattern) {
+        if (rows > 0 && columns > 0) sheet.getRange(row, column, rows, columns).setNumberFormat(pattern);
+      }
+      return { writeRows: writeRows, clearRows: clearRows, protectRange: protectRange,
+        protectSheet: protectSheet, format: format };
+    },
     readDepartment: function (config, period) { return create().readDepartment(config, period); },
     validateAccess: function (config) { return create().validateAccess(config); },
     writeApprovalState: function (config, writes) { return create().writeApprovalState(config, writes); } };
