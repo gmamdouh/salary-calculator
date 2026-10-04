@@ -1,0 +1,186 @@
+<script>
+  (function () {
+    var state = { setup: null, validation: null, employees: [], selected: {}, matchReport: null,
+      confirmedOcrIds: [], evidenceIds: [], decisions: null, draft: null, blockingErrors: [], unresolvedDecisions: 0,
+      validationUnresolvedCount: 0, ocrUnresolvedCount: 0, manualIssueCount: 0 };
+    var byId = function (id) { return document.getElementById(id); };
+    function showError(message) {
+      var box = byId('errors'); box.hidden = false;
+      box.textContent = Array.isArray(message) ? message.map(function (item) { return item.message || item.code || String(item); }).join('\n') : String(message);
+    }
+    function clearError() { var box = byId('errors'); box.hidden = true; box.textContent = ''; }
+    function setStatus(message) { byId('status').textContent = message || ''; }
+    function invokeServer(name, value) {
+      return new Promise(function (resolve, reject) {
+        var runner = google.script.run.withSuccessHandler(resolve).withFailureHandler(function (error) { reject(error); });
+        if (name === 'getRunSetup') runner.getRunSetup();
+        else if (name === 'validateRun') runner.validateRun(value);
+        else if (name === 'calculateDraft') runner.calculateDraft(value);
+        else if (name === 'saveOverride') runner.saveOverride(value);
+        else if (name === 'approveRun') runner.approveRun(value);
+        // These narrow server bridges call OcrService; image storage completes before Vision OCR.
+        else if (name === 'processHolidayScreenshot') runner.processHolidayScreenshot(value);
+        else if (name === 'matchHolidayNames') runner.matchHolidayNames(value);
+        else reject(new Error('Unknown payroll action'));
+      });
+    }
+    function goTo(name) {
+      document.querySelectorAll('[data-step]').forEach(function (item) { item.classList.toggle('active', item.dataset.step === name); });
+      document.querySelectorAll('[data-panel]').forEach(function (item) { item.hidden = item.dataset.panel !== name; item.classList.toggle('active', item.dataset.panel === name); });
+    }
+    function renderEmployees() {
+      var search = byId('employeeSearch').value.trim().toLowerCase(), container = byId('employeeList'); container.textContent = '';
+      state.employees.filter(function (employee) { return !search || employee.americanName.toLowerCase().indexOf(search) !== -1; }).forEach(function (employee) {
+        var label = document.createElement('label'); label.className = 'employee-option';
+        var checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.checked = !!state.selected[employee.employeeId];
+        checkbox.addEventListener('change', function () { state.selected[employee.employeeId] = checkbox.checked; refreshApproval(); updateManualResolveButton(); });
+        label.appendChild(checkbox); label.appendChild(document.createTextNode(employee.americanName + ' · ' + employee.department)); container.appendChild(label);
+      });
+    }
+    function selectDepartment(department) {
+      state.employees.filter(function (employee) { return employee.department === department; }).forEach(function (employee) { state.selected[employee.employeeId] = true; });
+      renderEmployees();
+    }
+    function showMatches(report) {
+      state.matchReport = report; var container = byId('matchResults'); container.textContent = '';
+      (report.matches || []).forEach(function (match) {
+        var row = document.createElement('div'); row.className = 'match-row'; row.textContent = match.americanName + ' · ' + match.status.replace(/_/g, ' '); container.appendChild(row);
+      });
+      (report.ambiguous || []).forEach(function (entry) {
+        var row = document.createElement('div'); row.className = 'match-row';
+        row.textContent = 'Ambiguous. Choose manually: ' + entry.candidates.map(function (candidate) { return candidate.americanName; }).join(', '); container.appendChild(row);
+      });
+      (report.unmatched || []).forEach(function () { var row = document.createElement('div'); row.className = 'match-row'; row.textContent = 'Unmatched name. Resolve manually before continuing.'; container.appendChild(row); });
+      state.manualIssueCount = (report.ambiguous || []).length + (report.unmatched || []).length;
+      state.ocrUnresolvedCount = (report.matches || []).length + state.manualIssueCount;
+      updateUnresolved(); byId('confirmMatches').disabled = !(report.matches || []).length; updateManualResolveButton(); refreshApproval();
+      (report.warnings || []).forEach(function (warning) {
+        var row = document.createElement('div'); row.className = 'match-row';
+        row.textContent = warning.code === 'DUPLICATE_AMERICAN_NAME' ? 'Warning: duplicate American name ' + warning.americanName : 'Warning: ' + warning.code;
+        container.appendChild(row);
+      });
+    }
+    function updateUnresolved() { state.unresolvedDecisions = state.validationUnresolvedCount + state.ocrUnresolvedCount; }
+    function updateManualResolveButton() {
+      var button = byId('resolveOcrManually'); if (button) button.disabled = !state.manualIssueCount || !selectedIds().length;
+    }
+    function selectedIds() { return Object.keys(state.selected).filter(function (id) { return state.selected[id]; }); }
+    function decisionPayload() {
+      return { holidayWork: { holidayId: state.setup && state.setup.holidayId || '', applies: byId('holidayApplies').checked,
+        employeeIds: selectedIds(), evidenceIds: state.evidenceIds },
+        ocr: { unresolvedCount: state.unresolvedDecisions, confirmedEmployeeIds: state.confirmedOcrIds } };
+    }
+    function missingOverrideReasons() {
+      return Array.prototype.some.call(document.querySelectorAll('[data-amount]'), function (input) {
+        var original = Number(input.dataset.original), edited = Number(input.value);
+        return !Number.isNaN(edited) && edited !== original && !byId(input.dataset.reasonId).value.trim();
+      });
+    }
+    function canApprove() { return !state.blockingErrors.length && state.unresolvedDecisions === 0 && !missingOverrideReasons() && !!state.draft; }
+    function refreshApproval() { var button = byId('approveRun'); if (button) button.disabled = !canApprove(); }
+    function renderDraft(result) {
+      state.draft = result; state.blockingErrors = result && (result.errors || result.blockingErrors) || [];
+      var container = byId('draftRows'); container.textContent = '';
+      if (state.blockingErrors.length) showError(state.blockingErrors);
+      (result && result.results || []).forEach(function (employee) {
+        Object.keys(employee.components || {}).forEach(function (component) {
+          var item = employee.components[component], original = Number(item.calculatedAmount == null ? item.amount : item.calculatedAmount);
+          var row = document.createElement('div'); row.className = 'draft-row'; row.dataset.employeeId = employee.employeeId; row.dataset.component = component;
+          row.innerHTML = '<strong></strong><div class="draft-grid"><label>Original calculated amount <input readonly></label><label>Edited amount <input data-amount></label></div><label>Reason for change <input data-reason></label>';
+          row.querySelector('strong').textContent = employee.americanName + ' · ' + component;
+          var inputs = row.querySelectorAll('input'); inputs[0].value = String(original); inputs[1].value = String(item.amount);
+          inputs[1].dataset.original = String(original); inputs[1].dataset.reasonId = 'reason-' + employee.employeeId + '-' + component;
+          inputs[2].id = inputs[1].dataset.reasonId; inputs[1].addEventListener('input', refreshApproval); inputs[2].addEventListener('input', refreshApproval);
+          container.appendChild(row);
+        });
+      });
+      refreshApproval();
+    }
+    byId('loadSetup').addEventListener('click', function () {
+      clearError(); setStatus('Loading setup…');
+      invokeServer('getRunSetup').then(function (setup) {
+        state.setup = setup || {}; var previous = new Date(); previous.setMonth(previous.getMonth() - 1);
+        byId('payrollMonth').value = setup.payrollMonth || previous.toISOString().slice(0, 7);
+        state.employees = setup.employees || []; goTo('validate'); setStatus('Setup loaded.');
+      }).catch(function (error) { showError(error.message || error); setStatus(''); });
+    });
+    byId('validateRun').addEventListener('click', function () {
+      clearError(); setStatus('Validating sources…');
+      var request = { payrollMonth: byId('payrollMonth').value, cutoffMode: byId('cutoffMode').value, departmentScope: [byId('department').value] };
+      invokeServer('validateRun', request).then(function (result) {
+        state.validation = result || {}; state.employees = result.employees || state.employees;
+        state.blockingErrors = result.errors || result.blockingErrors || [];
+        state.validationUnresolvedCount = result.unresolvedDecisionCount || 0; updateUnresolved();
+        byId('validationSummary').textContent = state.blockingErrors.length ? 'Blocking validation errors: ' + state.blockingErrors.length : 'Sources validated.';
+        if (state.blockingErrors.length) showError(state.blockingErrors); else { renderEmployees(); goTo('decisions'); }
+        setStatus('');
+      }).catch(function (error) { showError(error.message || error); setStatus(''); });
+    });
+    byId('employeeSearch').addEventListener('input', renderEmployees);
+    byId('selectAllSurvey').addEventListener('click', function () { selectDepartment('SURVEY'); });
+    byId('selectAllReservations').addEventListener('click', function () { selectDepartment('RESERVATIONS'); });
+    byId('matchPastedNames').addEventListener('click', function () {
+      clearError(); invokeServer('matchHolidayNames', byId('pastedNames').value).then(showMatches).catch(function (error) { showError(error.message || error); });
+    });
+    byId('uploadScreenshot').addEventListener('click', function () {
+      clearError(); var file = byId('holidayScreenshot').files[0];
+      if (!file) { showError('Choose a screenshot first.'); return; }
+      setStatus('Storing original screenshot and running OCR…');
+      var reader = new FileReader(); reader.onload = function () {
+        invokeServer('processHolidayScreenshot', { runId: state.validation && state.validation.runId,
+          imageData: reader.result, fileName: file.name, contentType: file.type }).then(function (result) {
+          if (result.evidence && result.evidence.evidenceId) state.evidenceIds.push(result.evidence.evidenceId);
+          showMatches(result.matchReport); setStatus('');
+        }).catch(function (error) { showError(error.message || error); state.ocrUnresolvedCount++; updateUnresolved(); refreshApproval(); setStatus(''); });
+      }; reader.onerror = function () { showError('The screenshot could not be read.'); state.ocrUnresolvedCount++; updateUnresolved(); refreshApproval(); };
+      reader.readAsDataURL(file);
+    });
+    byId('confirmMatches').addEventListener('click', function () {
+      var ids = (state.matchReport.matches || []).map(function (match) { return match.employeeId; });
+      ids.forEach(function (id) { state.selected[id] = true; state.confirmedOcrIds.push(id); });
+      state.ocrUnresolvedCount = Math.max(0, state.ocrUnresolvedCount - ids.length); updateUnresolved(); renderEmployees();
+      byId('matchResults').textContent = 'Confirmed American names added to the selection. Resolve any remaining ambiguous or unmatched names manually.';
+      byId('confirmMatches').disabled = true; refreshApproval();
+    });
+    byId('resolveOcrManually').addEventListener('click', function () {
+      var ids = selectedIds();
+      if (!state.manualIssueCount || !ids.length) { showError('Select the American name or names that resolve the remaining OCR entries.'); return; }
+      state.confirmedOcrIds = state.confirmedOcrIds.concat(ids);
+      state.ocrUnresolvedCount = Math.max(0, state.ocrUnresolvedCount - state.manualIssueCount); state.manualIssueCount = 0; updateUnresolved();
+      byId('matchResults').textContent = 'Ambiguous and unmatched OCR entries were resolved using the selected American names.';
+      updateManualResolveButton(); refreshApproval();
+    });
+    byId('saveDecisions').addEventListener('click', function () {
+      if (state.unresolvedDecisions || state.blockingErrors.length) { showError('Resolve blocking validation and OCR issues before continuing.'); return; }
+      state.decisions = decisionPayload(); goTo('draft');
+    });
+    byId('calculateDraft').addEventListener('click', function () {
+      clearError(); var request = { payrollMonth: byId('payrollMonth').value, cutoffMode: byId('cutoffMode').value,
+        departmentScope: [byId('department').value], decisions: state.decisions };
+      invokeServer('calculateDraft', request).then(renderDraft).catch(function (error) { showError(error.message || error); });
+    });
+    byId('saveDraftEdits').addEventListener('click', function () {
+      clearError(); var changed = Array.prototype.filter.call(document.querySelectorAll('[data-amount]'), function (input) { return Number(input.value) !== Number(input.dataset.original); });
+      if (changed.some(function (input) { return !byId(input.dataset.reasonId).value.trim(); })) { showError('Enter a reason for every changed amount.'); return; }
+      var chain = Promise.resolve();
+      changed.forEach(function (input) { chain = chain.then(function () {
+        var row = input.closest('.draft-row');
+        return invokeServer('saveOverride', { runId: state.draft.runId, employeeId: row.dataset.employeeId,
+          component: row.dataset.component, value: Number(input.value), reason: byId(input.dataset.reasonId).value.trim() });
+      }); });
+      chain.then(function () { goTo('approve'); byId('approvalSummary').textContent = 'Draft is ready for review.'; refreshApproval(); })
+        .catch(function (error) { showError(error.message || error); });
+    });
+    byId('approveRun').addEventListener('click', function () {
+      if (!canApprove()) { showError('Resolve blocking errors and missing override reasons before approval.'); return; }
+      invokeServer('approveRun', state.draft.runId).then(function (result) {
+        if (result && (result.valid === false || result.blockingErrors && result.blockingErrors.length)) {
+          state.blockingErrors = result.blockingErrors || result.errors || [{ message: 'Approval was blocked.' }]; showError(state.blockingErrors); return;
+        }
+        byId('approvalSummary').textContent = 'Payroll approved.'; byId('approveRun').disabled = true;
+      })
+        .catch(function (error) { showError(error.message || error); });
+    });
+    document.querySelectorAll('[data-step]').forEach(function (button) { button.addEventListener('click', function () { goTo(button.dataset.step); }); });
+  })();
+</script>

@@ -1,0 +1,24 @@
+<style>
+  :root { color-scheme: light; font: 14px Arial, sans-serif; color: #202124; }
+  body { margin: 0; background: #fff; }
+  main { padding: 16px; }
+  h1 { font-size: 20px; margin: 0 0 14px; }
+  h2 { font-size: 16px; margin: 0 0 12px; }
+  nav { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; margin-bottom: 12px; }
+  button { border: 1px solid #dadce0; border-radius: 4px; background: white; padding: 8px; cursor: pointer; }
+  button:disabled { cursor: not-allowed; opacity: .55; }
+  .step { font-size: 11px; padding: 7px 2px; }
+  .step.active { border-color: #1a73e8; color: #174ea6; font-weight: 700; }
+  .panel { display: none; border-top: 1px solid #dadce0; padding-top: 14px; }
+  .panel.active { display: block; }
+  label { display: block; margin: 12px 0; }
+  input:not([type=checkbox]), select, textarea { box-sizing: border-box; display: block; margin-top: 5px; padding: 8px; width: 100%; }
+  #status { min-height: 18px; color: #5f6368; }
+  .errors { border: 1px solid #d93025; background: #fce8e6; color: #b3261e; padding: 10px; margin: 8px 0; white-space: pre-line; }
+  .employee-list { max-height: 180px; overflow: auto; border: 1px solid #dadce0; padding: 6px; }
+  .employee-option { display: flex; gap: 8px; align-items: center; margin: 4px 0; }
+  .bulk-actions { display: flex; gap: 8px; }
+  .match-row, .draft-row { border-bottom: 1px solid #eee; padding: 8px 0; }
+  .draft-row label { margin: 5px 0; }
+  .draft-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+</style>

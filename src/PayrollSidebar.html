@@ -1,0 +1,50 @@
+<!doctype html>
+<html>
+  <head>
+    <base target="_top">
+    <?!= include('SidebarStyles'); ?>
+  </head>
+  <body>
+    <main>
+      <h1>Run payroll</h1>
+      <nav aria-label="Payroll steps">
+        <button type="button" class="step active" data-step="setup">Setup</button>
+        <button type="button" class="step" data-step="validate">Validate</button>
+        <button type="button" class="step" data-step="decisions">Decisions</button>
+        <button type="button" class="step" data-step="draft">Draft</button>
+        <button type="button" class="step" data-step="approve">Approve</button>
+      </nav>
+      <p id="status" role="status" aria-live="polite"></p>
+      <section id="errors" class="errors" aria-live="assertive" hidden></section>
+      <section class="panel active" id="panel-setup" data-panel="setup">
+        <h2>Setup</h2>
+        <label>Payroll month <input id="payrollMonth" type="month" required></label>
+        <label>Cutoff <select id="cutoffMode"><option value="TODAY">Through today</option><option value="MONTH_END">Month end</option></select></label>
+        <label>Department <select id="department"><option value="ALL">All</option><option>SURVEY</option><option>RESERVATIONS</option><option>SALES</option><option>TDS</option><option>MANAGEMENT</option></select></label>
+        <button type="button" id="loadSetup">Load setup</button>
+      </section>
+      <section class="panel" id="panel-validate" data-panel="validate" hidden><h2>Validate</h2><div id="validationSummary"></div><button type="button" id="validateRun">Validate sources</button></section>
+      <section class="panel" id="panel-decisions" data-panel="decisions" hidden>
+        <h2>Holiday decisions</h2>
+        <label><input id="holidayApplies" type="checkbox"> This holiday applies</label>
+        <label>Search employees <input id="employeeSearch" type="search" autocomplete="off"></label>
+        <div class="bulk-actions"><button type="button" id="selectAllSurvey">Select All Survey</button><button type="button" id="selectAllReservations">Select All Reservations</button></div>
+        <div id="employeeList" class="employee-list"></div>
+        <label>Paste American names <textarea id="pastedNames" rows="4" placeholder="One American name per line"></textarea></label>
+        <button type="button" id="matchPastedNames">Match pasted names</button>
+        <label>Upload screenshot <input id="holidayScreenshot" type="file" accept="image/*"></label>
+        <button type="button" id="uploadScreenshot">Store and read screenshot</button>
+        <div id="matchResults" aria-live="polite"></div>
+        <button type="button" id="confirmMatches" disabled>Confirm displayed matches</button>
+        <button type="button" id="resolveOcrManually" disabled>Resolve ambiguous or unmatched names from selection</button>
+        <button type="button" id="saveDecisions">Continue to draft</button>
+      </section>
+      <section class="panel" id="panel-draft" data-panel="draft" hidden>
+        <h2>Draft</h2><p>Changed amounts require a reason. Original and edited values are shown together.</p>
+        <div id="draftRows"></div><button type="button" id="calculateDraft">Calculate draft</button><button type="button" id="saveDraftEdits">Save edits</button>
+      </section>
+      <section class="panel" id="panel-approve" data-panel="approve" hidden><h2>Approve</h2><div id="approvalSummary"></div><button type="button" id="approveRun" disabled>Approve payroll</button></section>
+    </main>
+    <?!= include('SidebarScripts'); ?>
+  </body>
+</html>
