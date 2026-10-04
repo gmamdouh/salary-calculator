@@ -5,7 +5,7 @@ SalaryCalculator.WorkbookSetup = (function () {
     'Sources & Mappings': { headers: ['Department', 'Employee Workbook ID', 'Leave Tracker Workbook ID', 'Employee Tab', 'Attendance Tab', 'Employee Header Row', 'Attendance Header Row', 'Employee Column Mappings', 'Attendance Column Mappings', 'Approval Column Mappings', 'Access Check', 'Last Checked'] },
     'Salary Rules': { headers: ['Rule Type', 'Department', 'Rule Key', 'Value', 'Notes'] },
     'Holiday Calendar': { headers: ['Holiday Name', 'Occasion Date', 'Actual Holiday Date', 'Number of Days', 'Triple Pay', 'Status'] },
-    'Latest Results': { title: 'Active Employees', headerRow: 2, headers: ['American Name', 'Department', 'Payroll Month', 'Cutoff', 'Final Settlement', 'Basic EGP', 'ABS EGP', 'Commission EGP', 'Extra Days EGP', 'Annual Balance EGP', 'Probation EGP', 'Referral EGP', 'Deductions EGP', 'Total EGP', 'Notes', 'Warnings'] },
+    'Latest Results': { title: 'Active Employees', headerRow: 2, headers: ['American Name', 'Department', 'Payroll Month', 'Cutoff', 'Basic EGP', 'ABS EGP', 'Commission EGP', 'Extra Days EGP', 'Probation EGP', 'Referral EGP', 'Deductions EGP', 'Total EGP', 'Notes', 'Warnings'] },
     'Payroll History': { headers: ['Run ID', 'Version', 'State', 'Employee ID', 'American Name', 'Department', 'Payroll Month', 'Cutoff', 'Final Settlement', 'Basic EGP', 'ABS EGP', 'Commission EGP', 'Extra Days EGP', 'Annual Balance EGP', 'Probation EGP', 'Referral EGP', 'Deductions EGP', 'Total EGP', 'Run Snapshot Ref'] },
     'Payment Ledger': { headers: ['Benefit Key', 'Type', 'Employee ID', 'Related Employee ID', 'Amount EGP', 'Payroll Month', 'Run ID', 'Paid', 'Payment Date', 'Decision', 'Eligibility', 'Notes'] },
     'Override Audit': { headers: ['Run ID', 'Component', 'Employee ID', 'American Name', 'Calculated EGP', 'Previous EGP', 'Edited EGP', 'Reason', 'Editor', 'Timestamp'] },
@@ -28,7 +28,10 @@ SalaryCalculator.WorkbookSetup = (function () {
     ['Prophet Muhammad’s Birthday', '15-08-2027', '15-08-2027', 1, 'Yes', 'Estimated'],
     ['Armed Forces Day / October 6 Victory', '06-10-2027', '07-10-2027', 1, 'Yes', 'Estimated until official postponement decision']
   ];
-  var COMPONENTS = ['basic', 'abs', 'commission', 'extraDays', 'annualBalance', 'probation', 'referral', 'deductions'];
+  var ACTIVE_COMPONENTS = ['basic', 'abs', 'commission', 'extraDays', 'probation', 'referral', 'deductions'];
+  var FINAL_COMPONENTS = ['basic', 'abs', 'commission', 'extraDays', 'annualBalance', 'probation', 'referral', 'deductions'];
+  var HISTORY_COMPONENTS = ['basic', 'abs', 'commission', 'extraDays', 'annualBalance', 'probation', 'referral', 'deductions'];
+  var FINAL_HEADERS = ['American Name', 'Department', 'Payroll Month', 'Cutoff', 'Basic EGP', 'ABS EGP', 'Commission EGP', 'Extra Days EGP', 'Annual Balance EGP', 'Probation EGP', 'Referral EGP', 'Deductions EGP', 'Total EGP', 'Notes', 'Warnings'];
 
   function masterGateway() { return SalaryCalculator.SpreadsheetGateway.createMaster(); }
   function ensureManagedSheets(spreadsheet) {
@@ -80,7 +83,7 @@ SalaryCalculator.WorkbookSetup = (function () {
       });
     });
     rows.push(['COMMISSION', 'TDS', 'transfers > 75', 100, 'EGP per qualifying agent']);
-    rows.push(['CYCLE', 'SALES', 'quarterly payment months', '3,6,9,12', 'Company-wide quarterly ABS payout months']);
+    rows.push(['CYCLE', 'SALES', 'quarterly payment months', '', 'Unset. Configure company-wide payout months before enabling quarterly ABS payment.']);
     masterGateway().writeRows(sheet, 2, 1, rows);
     masterGateway().format(sheet, 2, 4, 20, 1, '"EGP "#,##0.00');
     masterGateway().format(sheet, 22, 4, 37, 1, '"EGP "#,##0.00');
@@ -134,24 +137,24 @@ SalaryCalculator.WorkbookSetup = (function () {
     gateway.writeRows(sheet, 2, 1, [SHEETS['Latest Results'].headers]);
     var active = run.results.filter(function (item) { return item.finalSettlement !== true; });
     var final = run.results.filter(function (item) { return item.finalSettlement === true; });
-    function values(result) {
-      var row = [americanName(run, result), result.department || '', run.payrollMonth || result.payrollMonth || '', dateValue(run.cutoff), result.finalSettlement === true];
-      COMPONENTS.forEach(function (component) { row.push(amount(result, component)); });
+    function values(result, isFinal) {
+      var row = [americanName(run, result), result.department || '', run.payrollMonth || result.payrollMonth || '', dateValue(run.cutoff)];
+      (isFinal ? FINAL_COMPONENTS : ACTIVE_COMPONENTS).forEach(function (component) { row.push(amount(result, component)); });
       row.push(typeof result.total === 'number' ? result.total : SalaryCalculator.PayrollEngine.sumComponents(result.components || {}));
       row.push((result.notes || []).join('; '));
       row.push((result.warnings || []).join('; '));
       return row;
     }
-    var activeRows = active.map(values), finalTitleRow = 3 + activeRows.length + 1;
+    var activeRows = active.map(function (result) { return values(result, false); }), finalTitleRow = 3 + activeRows.length + 1;
     if (activeRows.length) gateway.writeRows(sheet, 3, 1, activeRows);
     gateway.writeRows(sheet, finalTitleRow, 1, [['Final Settlements']]);
-    gateway.writeRows(sheet, finalTitleRow + 1, 1, [SHEETS['Latest Results'].headers]);
-    var finalRows = final.map(values);
+    gateway.writeRows(sheet, finalTitleRow + 1, 1, [FINAL_HEADERS]);
+    var finalRows = final.map(function (result) { return values(result, true); });
     if (finalRows.length) gateway.writeRows(sheet, finalTitleRow + 2, 1, finalRows);
     var totalRows = activeRows.length + finalRows.length;
     if (totalRows) {
-      gateway.format(sheet, 3, 6, activeRows.length || 1, 9, '"EGP "#,##0.00');
-      gateway.format(sheet, finalTitleRow + 2, 6, finalRows.length || 1, 9, '"EGP "#,##0.00');
+      gateway.format(sheet, 3, 5, activeRows.length || 1, 8, '"EGP "#,##0.00');
+      gateway.format(sheet, finalTitleRow + 2, 5, finalRows.length || 1, 9, '"EGP "#,##0.00');
       gateway.format(sheet, 3, 4, activeRows.length || 1, 1, 'dd-MM-yyyy');
       gateway.format(sheet, finalTitleRow + 2, 4, finalRows.length || 1, 1, 'dd-MM-yyyy');
     }
@@ -166,7 +169,7 @@ SalaryCalculator.WorkbookSetup = (function () {
       var duplicate = existing.some(function (row) { return row[0] === run.runId && row[1] === run.version && row[2] === state && row[3] === result.employeeId; });
       if (duplicate) return;
       var row = [run.runId, run.version, state, result.employeeId || '', americanName(run, result), result.department || '', run.payrollMonth || result.payrollMonth || '', dateValue(run.cutoff), result.finalSettlement === true];
-      COMPONENTS.forEach(function (component) { row.push(amount(result, component)); });
+      HISTORY_COMPONENTS.forEach(function (component) { row.push(amount(result, component)); });
       row.push(typeof result.total === 'number' ? result.total : SalaryCalculator.PayrollEngine.sumComponents(result.components || {}));
       row.push(run.runId + ':' + run.version + ':' + state);
       rows.push(row);

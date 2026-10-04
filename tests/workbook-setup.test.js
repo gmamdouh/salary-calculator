@@ -3,6 +3,19 @@ const assert = require('node:assert/strict');
 const { loadAppsScript } = require('./helpers/load-apps-script');
 const { runRecord } = require('./helpers/fixtures');
 
+const expectedHeaders = {
+  'Dashboard': ['Section', 'Value', 'Updated At'],
+  'Sources & Mappings': ['Department', 'Employee Workbook ID', 'Leave Tracker Workbook ID', 'Employee Tab', 'Attendance Tab', 'Employee Header Row', 'Attendance Header Row', 'Employee Column Mappings', 'Attendance Column Mappings', 'Approval Column Mappings', 'Access Check', 'Last Checked'],
+  'Salary Rules': ['Rule Type', 'Department', 'Rule Key', 'Value', 'Notes'],
+  'Holiday Calendar': ['Holiday Name', 'Occasion Date', 'Actual Holiday Date', 'Number of Days', 'Triple Pay', 'Status'],
+  'Latest Results': ['American Name', 'Department', 'Payroll Month', 'Cutoff', 'Basic EGP', 'ABS EGP', 'Commission EGP', 'Extra Days EGP', 'Probation EGP', 'Referral EGP', 'Deductions EGP', 'Total EGP', 'Notes', 'Warnings'],
+  'Payroll History': ['Run ID', 'Version', 'State', 'Employee ID', 'American Name', 'Department', 'Payroll Month', 'Cutoff', 'Final Settlement', 'Basic EGP', 'ABS EGP', 'Commission EGP', 'Extra Days EGP', 'Annual Balance EGP', 'Probation EGP', 'Referral EGP', 'Deductions EGP', 'Total EGP', 'Run Snapshot Ref'],
+  'Payment Ledger': ['Benefit Key', 'Type', 'Employee ID', 'Related Employee ID', 'Amount EGP', 'Payroll Month', 'Run ID', 'Paid', 'Payment Date', 'Decision', 'Eligibility', 'Notes'],
+  'Override Audit': ['Run ID', 'Component', 'Employee ID', 'American Name', 'Calculated EGP', 'Previous EGP', 'Edited EGP', 'Reason', 'Editor', 'Timestamp'],
+  'Run Decisions': ['Run ID', 'Decision Type', 'Employee ID', 'American Name', 'Decision', 'Reason', 'Evidence URL', 'Acknowledged By', 'Timestamp', 'Details JSON'],
+  'Payroll Runs': ['Run ID', 'Version', 'State', 'Payroll Month', 'Cutoff', 'RunRecord JSON']
+};
+
 function fakeSpreadsheet() {
   const sheets = new Map();
   function range(sheet, row, column, rows = 1, columns = 1) {
@@ -53,15 +66,15 @@ test('initialization creates the approved managed tabs with stable headers and p
   assert.ok(spreadsheet.getSheetByName('Payroll History').protections.length > 0);
   assert.equal(spreadsheet.getSheetByName('Payroll Runs').hidden, true);
   assert.ok(spreadsheet.getSheetByName('Payroll Runs').protections.length > 0);
-  const schema = WorkbookSetup.schema();
-  for (const [name, definition] of Object.entries(schema)) {
-    const headerRow = definition.headerRow || 1;
-    assert.deepEqual(Array.from(spreadsheet.getSheetByName(name).getRange(headerRow, 1, 1, definition.headers.length).getValues()[0]), Array.from(definition.headers));
+  for (const [name, headers] of Object.entries(expectedHeaders)) {
+    const row = name === 'Latest Results' ? 2 : 1;
+    assert.deepEqual(spreadsheet.getSheetByName(name).getRange(row, 1, 1, headers.length).getValues()[0], headers);
   }
   const rules = spreadsheet.getSheetByName('Salary Rules').getRange(2, 1, 60, 5).getValues();
   assert.ok(rules.some(row => row[0] === 'SALARY' && row[1] === 'SURVEY' && row[2] === 'after.basic' && row[3] === 15000));
   assert.ok(rules.some(row => row[0] === 'COMMISSION' && row[1] === 'SALES' && row[2] === '6.00%+|50+' && row[3] === 1300));
-  assert.ok(rules.some(row => row[0] === 'CYCLE' && row[1] === 'SALES' && row[3] === '3,6,9,12'));
+  assert.ok(rules.some(row => row[0] === 'CYCLE' && row[1] === 'SALES' && row[2] === 'quarterly payment months' && row[3] === ''));
+  assert.equal(rules.some(row => String(row[3]).includes('3,6,9,12')), false);
 });
 
 test('initialization is idempotent and seeds the exact 2027 holiday calendar', () => {
@@ -99,7 +112,7 @@ test('latest results separates active employees and final settlements and never 
   const spreadsheet = fakeSpreadsheet();
   const sheetMap = WorkbookSetup.ensureManagedSheets(spreadsheet);
   const run = runRecord({ results: [
-    { employeeId: 'EMP-001', americanName: 'Alex Smith', department: 'SURVEY', finalSettlement: false, components: { basic: { amount: 12000 }, abs: { amount: 2000 } }, total: 14000 },
+    { employeeId: 'EMP-001', americanName: 'Alex Smith', department: 'SURVEY', finalSettlement: false, components: { basic: { amount: 12000 }, abs: { amount: 2000 }, annualBalance: { amount: 7777 } }, total: 14000 },
     { employeeId: 'EMP-002', americanName: 'Jamie Doe', department: 'TDS', finalSettlement: true, components: { basic: { amount: 21000 }, annualBalance: { amount: 600 } }, total: 21600 }
   ] });
   WorkbookSetup.renderLatestResults(sheetMap, run);
@@ -108,6 +121,17 @@ test('latest results separates active employees and final settlements and never 
   assert.match(visible, /Alex Smith/); assert.match(visible, /Jamie Doe/);
   assert.doesNotMatch(visible, /EMP-001|EMP-002|realName|Internal Name/);
   assert.ok(spreadsheet.getSheetByName('Latest Results').formats.some(format => format.value.includes('EGP')));
+  const sheet = spreadsheet.getSheetByName('Latest Results');
+  const activeHeaders = ['American Name', 'Department', 'Payroll Month', 'Cutoff', 'Basic EGP', 'ABS EGP', 'Commission EGP', 'Extra Days EGP', 'Probation EGP', 'Referral EGP', 'Deductions EGP', 'Total EGP', 'Notes', 'Warnings'];
+  const finalHeaders = ['American Name', 'Department', 'Payroll Month', 'Cutoff', 'Basic EGP', 'ABS EGP', 'Commission EGP', 'Extra Days EGP', 'Annual Balance EGP', 'Probation EGP', 'Referral EGP', 'Deductions EGP', 'Total EGP', 'Notes', 'Warnings'];
+  assert.deepEqual(sheet.getRange(2, 1, 1, activeHeaders.length).getValues()[0], activeHeaders);
+  assert.deepEqual(sheet.getRange(6, 1, 1, finalHeaders.length).getValues()[0], finalHeaders);
+  const activeRow = sheet.getRange(3, 1, 1, activeHeaders.length).getValues()[0];
+  const finalRow = sheet.getRange(7, 1, 1, finalHeaders.length).getValues()[0];
+  assert.equal(activeRow.includes(7777), false);
+  assert.equal(activeRow[11], 14000);
+  assert.equal(finalRow[8], 600);
+  assert.equal(finalRow[12], 21600);
 });
 
 test('history preserves Employee IDs in protected audit data and appends one row per result', () => {
