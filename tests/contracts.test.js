@@ -18,7 +18,7 @@ for (const value of ['bad-date', '2026-02-30', '2025-12-31']) {
   });
 }
 for (const field of ['transfers', 'sales', 'activeCalls', 'conversionRate']) {
-  for (const value of ['10', NaN, Infinity, -1, null, undefined]) {
+  for (const value of ['10', NaN, Infinity, -1, null]) {
     test(`rejects invalid performance ${field} ${String(value)}`, () => {
       const record = fixtures.employee();
       record.performance[field] = value;
@@ -26,6 +26,13 @@ for (const field of ['transfers', 'sales', 'activeCalls', 'conversionRate']) {
     });
   }
 }
+test('accepts empty and partial performance records', () => {
+  assert.doesNotThrow(() => calculator.Contracts.assertEmployee(fixtures.employee({ performance: {} })));
+  for (const field of ['transfers', 'sales', 'activeCalls', 'conversionRate']) {
+    assert.doesNotThrow(() => calculator.Contracts.assertEmployee(fixtures.employee({ performance: { [field]: 0 } })));
+    assert.doesNotThrow(() => calculator.Contracts.assertEmployee(fixtures.employee({ performance: { [field]: undefined } })));
+  }
+});
 test('validates departments and calendar dates', () => {
   for (const department of ['SURVEY', 'RESERVATIONS', 'SALES', 'TDS', 'MANAGEMENT']) {
     assert.doesNotThrow(() => calculator.Contracts.assertEmployee(fixtures.employee({ department })));
@@ -37,9 +44,11 @@ test('validates departments and calendar dates', () => {
 for (const method of ['assertRules', 'assertDecisionSet']) {
   test(`${method} accepts open records and validates known enum values`, () => {
     assert.doesNotThrow(() => calculator.Contracts[method]({ extra: true }));
-    assert.doesNotThrow(() => calculator.Contracts[method]({ nested: { cutoffMode: 'TODAY', state: 'DRAFT' } }));
+    assert.doesNotThrow(() => calculator.Contracts[method]({ cutoffMode: 'TODAY', state: 'DRAFT', runState: 'APPROVED' }));
     for (const value of [null, [], 'value', new Date()]) assert.throws(() => calculator.Contracts[method](value), /object/);
-    assert.throws(() => calculator.Contracts[method]({ nested: { cutoffMode: 'OTHER' } }), /cutoffMode/);
-    assert.throws(() => calculator.Contracts[method]({ nested: { state: 'OTHER' } }), /state/);
+    assert.throws(() => calculator.Contracts[method]({ cutoffMode: 'OTHER' }), /cutoffMode/);
+    assert.throws(() => calculator.Contracts[method]({ state: 'OTHER' }), /state/);
+    assert.throws(() => calculator.Contracts[method]({ runState: 'OTHER' }), /runState/);
+    assert.doesNotThrow(() => calculator.Contracts[method]({ nested: { cutoffMode: 'OTHER', state: 'ACTIVE', runState: 'PENDING' } }));
   });
 }

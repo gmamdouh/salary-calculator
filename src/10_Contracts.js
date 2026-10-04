@@ -7,7 +7,7 @@
  * @property {?string} [lastWorkingDay] ISO YYYY-MM-DD, inclusive.
  * @property {string} [realName]
  * @property {string} [role]
- * @property {{transfers:number,sales:number,activeCalls:number,conversionRate:number}} [performance]
+ * @property {{transfers:(number|undefined),sales:(number|undefined),activeCalls:(number|undefined),conversionRate:(number|undefined)}} [performance] Each metric is optional.
  */
 /** @typedef {Object<string, *>} RulesRecord Open rules record. */
 /** @typedef {Object<string, *>} DecisionSet Open decision record. */
@@ -44,27 +44,23 @@ SalaryCalculator.Contracts = (function () {
       assertObject(record.performance, 'performance');
       ['transfers', 'sales', 'activeCalls', 'conversionRate'].forEach(function (field) {
         var value = record.performance[field];
-        if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) throw new Error('performance.' + field + ' must be a finite nonnegative number');
+        if (value !== undefined && (typeof value !== 'number' || !Number.isFinite(value) || value < 0)) throw new Error('performance.' + field + ' must be a finite nonnegative number');
       });
     }
     return record;
   }
-  // Open records: only recognized values are constrained; later tasks may add fields.
-  function assertKnownValues(record, label, seen) {
-    if (!record || typeof record !== 'object') return;
-    if (seen.indexOf(record) !== -1) return;
-    seen.push(record);
+  // Open records: only recognized top-level values are constrained; later tasks may add fields.
+  function assertKnownValues(record, label) {
     Object.keys(record).forEach(function (key) {
       var value = record[key];
       var field = label + '.' + key;
       if (key === 'cutoffMode') assertEnum(value, SalaryCalculator.Constants.CUTOFF_MODES, field);
       if (key === 'state' || key === 'runState') assertEnum(value, SalaryCalculator.Constants.RUN_STATES, field);
-      assertKnownValues(value, field, seen);
     });
   }
   function assertOpenRecord(record, label) {
     assertObject(record, label);
-    assertKnownValues(record, label, []);
+    assertKnownValues(record, label);
     return record;
   }
   return {
