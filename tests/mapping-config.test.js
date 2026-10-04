@@ -200,3 +200,27 @@ test('configured approval headers are included in read-only access validation', 
   assert.equal(report.errors[0].field, 'paid');
   assert.equal(fake.writes.length, 0);
 });
+
+test('final payroll payment dates normalize configured source formats to ISO and allow blanks', () => {
+  const { MappingConfig } = loadAppsScript();
+  const config = mappingConfig({ dateFormat: 'DD/MM/YYYY', employeeColumns: { ...mappingConfig().employeeColumns, finalPayrollPaymentDate: 'Final Paid' } });
+  const row = sourceRow(); row.headers.push('Final Paid'); row.values.push('01/02/2026');
+  assert.equal(MappingConfig.normalizeEmployee(row, config).finalPayrollPaymentDate, '2026-02-01');
+  row.values[8] = '2026-02-01';
+  assert.equal(MappingConfig.normalizeEmployee(row, config).finalPayrollPaymentDate, '2026-02-01');
+  row.values[8] = '';
+  assert.equal(MappingConfig.normalizeEmployee(row, config).finalPayrollPaymentDate, undefined);
+});
+
+test('impossible final payroll payment dates block with exact source coordinates', () => {
+  const { MappingConfig } = loadAppsScript();
+  const config = mappingConfig({ dateFormat: 'DD/MM/YYYY', employeeColumns: { ...mappingConfig().employeeColumns, finalPayrollPaymentDate: 'Final Paid' } });
+  for (const invalid of ['2026-02-30', '30/02/2026']) {
+    const row = sourceRow({ rowNumber: 12 }); row.headers.push('Final Paid'); row.values.push(invalid);
+    assert.throws(() => MappingConfig.normalizeEmployee(row, config), error => {
+      const found = error.issues.find(issue => issue.field === 'finalPayrollPaymentDate');
+      assert.deepEqual(plain(found), { code: 'INVALID_DATE', message: 'Expected a valid date in DD/MM/YYYY', field: 'finalPayrollPaymentDate', spreadsheetId: 'fixture-source', tab: 'Team', row: 12, column: 9 });
+      return true;
+    });
+  }
+});

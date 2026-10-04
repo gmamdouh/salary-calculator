@@ -106,7 +106,7 @@ SalaryCalculator.MappingConfig = (function () {
     Object.keys(mapping.employeeColumns).forEach(function (field) {
       var value = source.values[field];
       function add(code, message) { errors.push(issue(mapping, 'employee', source.rowNumber, field, code, message, source.positions[field])); }
-      if (['firstWorkingDay', 'lastWorkingDay'].indexOf(field) !== -1) {
+      if (['firstWorkingDay', 'lastWorkingDay', 'finalPayrollPaymentDate'].indexOf(field) !== -1) {
         if (text(value) || field === 'firstWorkingDay') {
           try { record[field] = date(value, mapping.dateFormat); } catch (error) { add('INVALID_DATE', error.message); }
         }
