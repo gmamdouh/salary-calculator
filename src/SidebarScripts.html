@@ -1,8 +1,58 @@
 <script>
+  var PayrollSidebarOcrAttemptTracker = (function () {
+    function create() {
+      var attempts = [], nextId = 0;
+      function find(attemptId) { return attempts.find(function (attempt) { return attempt.id === attemptId; }); }
+      function snapshot(attempt) {
+        return { id: attempt.id, evidenceId: attempt.evidenceId, matches: attempt.matches.map(function (match) {
+          return { americanName: match.americanName, employeeId: match.employeeId, confirmed: match.confirmed };
+        }), manualIssues: attempt.manualIssues.map(function (issue) { return { kind: issue.kind,
+          candidates: issue.candidates, resolved: issue.resolved }; }), warnings: attempt.warnings };
+      }
+      return {
+        add: function (report, evidenceId) {
+          report = report || {};
+          var attempt = { id: 'ocr-' + (++nextId), evidenceId: evidenceId || null,
+            matches: (report.matches || []).map(function (match) { return { americanName: match.americanName,
+              employeeId: match.employeeId, confirmed: match.confirmed === true || match.status === 'CONFIRMED' }; }),
+            manualIssues: (report.ambiguous || []).map(function (entry) { return { kind: 'AMBIGUOUS', candidates: entry.candidates || [], resolved: false }; })
+              .concat((report.unmatched || []).map(function () { return { kind: 'UNMATCHED', candidates: [], resolved: false }; })),
+            warnings: report.warnings || [] };
+          attempts.push(attempt);
+          return attempt.id;
+        },
+        attempts: function () { return attempts.map(snapshot); },
+        confirmMatches: function (attemptId) {
+          var attempt = find(attemptId); if (!attempt) return [];
+          var ids = [];
+          attempt.matches.forEach(function (match) {
+            if (!match.confirmed) { match.confirmed = true; ids.push(match.employeeId); }
+          });
+          return ids;
+        },
+        resolveManual: function (attemptId, issueIndex, selectedEmployeeIds) {
+          var attempt = find(attemptId), issue = attempt && attempt.manualIssues[issueIndex], ids = (selectedEmployeeIds || []).map(String);
+          if (!issue || issue.resolved || !ids.length) return [];
+          issue.resolved = true;
+          return ids;
+        },
+        unresolvedCount: function () {
+          return attempts.reduce(function (total, attempt) {
+            return total + attempt.manualIssues.filter(function (issue) { return !issue.resolved; }).length +
+              attempt.matches.filter(function (match) { return !match.confirmed; }).length;
+          }, 0);
+        }
+      };
+    }
+    return { create: create };
+  })();
+</script>
+<script>
   (function () {
-    var state = { setup: null, validation: null, employees: [], selected: {}, matchReport: null,
+    var ocrAttempts = PayrollSidebarOcrAttemptTracker.create();
+    var state = { setup: null, validation: null, employees: [], selected: {},
       confirmedOcrIds: [], evidenceIds: [], decisions: null, draft: null, blockingErrors: [], unresolvedDecisions: 0,
-      validationUnresolvedCount: 0, ocrUnresolvedCount: 0, manualIssueCount: 0 };
+      validationUnresolvedCount: 0 };
     var byId = function (id) { return document.getElementById(id); };
     function showError(message) {
       var box = byId('errors'); box.hidden = false;
@@ -33,38 +83,69 @@
       state.employees.filter(function (employee) { return !search || employee.americanName.toLowerCase().indexOf(search) !== -1; }).forEach(function (employee) {
         var label = document.createElement('label'); label.className = 'employee-option';
         var checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.checked = !!state.selected[employee.employeeId];
-        checkbox.addEventListener('change', function () { state.selected[employee.employeeId] = checkbox.checked; refreshApproval(); updateManualResolveButton(); });
+        checkbox.addEventListener('change', function () { state.selected[employee.employeeId] = checkbox.checked; refreshApproval(); updateManualResolveButtons(); });
         label.appendChild(checkbox); label.appendChild(document.createTextNode(employee.americanName + ' · ' + employee.department)); container.appendChild(label);
       });
     }
     function selectDepartment(department) {
       state.employees.filter(function (employee) { return employee.department === department; }).forEach(function (employee) { state.selected[employee.employeeId] = true; });
-      renderEmployees();
+      renderEmployees(); updateManualResolveButtons();
     }
-    function showMatches(report) {
-      state.matchReport = report; var container = byId('matchResults'); container.textContent = '';
-      (report.matches || []).forEach(function (match) {
-        var row = document.createElement('div'); row.className = 'match-row'; row.textContent = match.americanName + ' · ' + match.status.replace(/_/g, ' '); container.appendChild(row);
-      });
-      (report.ambiguous || []).forEach(function (entry) {
-        var row = document.createElement('div'); row.className = 'match-row';
-        row.textContent = 'Ambiguous. Choose manually: ' + entry.candidates.map(function (candidate) { return candidate.americanName; }).join(', '); container.appendChild(row);
-      });
-      (report.unmatched || []).forEach(function () { var row = document.createElement('div'); row.className = 'match-row'; row.textContent = 'Unmatched name. Resolve manually before continuing.'; container.appendChild(row); });
-      state.manualIssueCount = (report.ambiguous || []).length + (report.unmatched || []).length;
-      state.ocrUnresolvedCount = (report.matches || []).length + state.manualIssueCount;
-      updateUnresolved(); byId('confirmMatches').disabled = !(report.matches || []).length; updateManualResolveButton(); refreshApproval();
-      (report.warnings || []).forEach(function (warning) {
-        var row = document.createElement('div'); row.className = 'match-row';
-        row.textContent = warning.code === 'DUPLICATE_AMERICAN_NAME' ? 'Warning: duplicate American name ' + warning.americanName : 'Warning: ' + warning.code;
-        container.appendChild(row);
-      });
+    function showMatches(report, evidenceId) {
+      report = report || {};
+      if (!(report.matches || []).length && !(report.ambiguous || []).length && !(report.unmatched || []).length) {
+        report.unmatched = [{ status: 'UNMATCHED' }];
+      }
+      ocrAttempts.add(report, evidenceId);
+      renderMatchAttempts();
     }
-    function updateUnresolved() { state.unresolvedDecisions = state.validationUnresolvedCount + state.ocrUnresolvedCount; }
-    function updateManualResolveButton() {
-      var button = byId('resolveOcrManually'); if (button) button.disabled = !state.manualIssueCount || !selectedIds().length;
+    function appendRow(container, text) {
+      var row = document.createElement('div'); row.className = 'match-row'; row.textContent = text; container.appendChild(row);
     }
+    function renderMatchAttempts() {
+      var container = byId('matchResults'); container.textContent = '';
+      ocrAttempts.attempts().forEach(function (attempt, index) {
+        var card = document.createElement('div'); card.className = 'ocr-attempt'; card.dataset.attemptId = attempt.id;
+        appendRow(card, (attempt.evidenceId ? 'Screenshot' : 'Pasted names') + ' attempt ' + (index + 1));
+        attempt.matches.forEach(function (match) {
+          appendRow(card, match.americanName + ' · ' + (match.confirmed ? 'confirmed' : 'pending confirmation'));
+        });
+        attempt.manualIssues.forEach(function (issue, issueIndex) {
+          appendRow(card, issue.kind === 'AMBIGUOUS' ? 'Ambiguous' + (issue.resolved ? ' (manually resolved)' : '. Choose manually') + ': ' +
+            issue.candidates.map(function (candidate) { return candidate.americanName; }).join(', ') :
+            'Unmatched name' + (issue.resolved ? ' (manually resolved).' : '. Resolve manually before continuing.'));
+          if (!issue.resolved) {
+            var resolveIssue = document.createElement('button'); resolveIssue.type = 'button';
+            resolveIssue.dataset.resolveAttempt = attempt.id; resolveIssue.dataset.issueIndex = String(issueIndex);
+            resolveIssue.disabled = !selectedIds().length; resolveIssue.textContent = 'Resolve this OCR entry with selected American names';
+            card.appendChild(resolveIssue);
+          }
+        });
+        attempt.warnings.forEach(function (warning) {
+          appendRow(card, warning.code === 'DUPLICATE_AMERICAN_NAME' ? 'Warning: duplicate American name ' + warning.americanName : 'Warning: ' + warning.code);
+        });
+        if (attempt.evidenceId) appendRow(card, 'Original screenshot retained with this attempt.');
+        var hasPendingMatches = attempt.matches.some(function (match) { return !match.confirmed; });
+        if (hasPendingMatches) {
+          var confirm = document.createElement('button'); confirm.type = 'button'; confirm.dataset.confirmAttempt = attempt.id;
+          confirm.textContent = 'Confirm this attempt’s exact matches'; card.appendChild(confirm);
+        }
+        container.appendChild(card);
+      });
+      updateUnresolved(); refreshApproval();
+    }
+    function updateUnresolved() { state.unresolvedDecisions = state.validationUnresolvedCount + ocrAttempts.unresolvedCount(); }
     function selectedIds() { return Object.keys(state.selected).filter(function (id) { return state.selected[id]; }); }
+    function updateManualResolveButtons() {
+      document.querySelectorAll('[data-resolve-attempt]').forEach(function (button) { button.disabled = !selectedIds().length; });
+    }
+    function addConfirmedIds(ids) {
+      ids.forEach(function (id) {
+        state.selected[id] = true;
+        if (state.confirmedOcrIds.indexOf(id) === -1) state.confirmedOcrIds.push(id);
+      });
+    }
+    function recordFailedAttempt() { showMatches({ matches: [], ambiguous: [], unmatched: [{ status: 'ERROR' }] }); }
     function decisionPayload() {
       return { holidayWork: { holidayId: state.setup && state.setup.holidayId || '', applies: byId('holidayApplies').checked,
         employeeIds: selectedIds(), evidenceIds: state.evidenceIds },
@@ -120,7 +201,8 @@
     byId('selectAllSurvey').addEventListener('click', function () { selectDepartment('SURVEY'); });
     byId('selectAllReservations').addEventListener('click', function () { selectDepartment('RESERVATIONS'); });
     byId('matchPastedNames').addEventListener('click', function () {
-      clearError(); invokeServer('matchHolidayNames', byId('pastedNames').value).then(showMatches).catch(function (error) { showError(error.message || error); });
+      clearError(); invokeServer('matchHolidayNames', byId('pastedNames').value).then(function (report) { showMatches(report); })
+        .catch(function (error) { showError(error.message || error); recordFailedAttempt(); });
     });
     byId('uploadScreenshot').addEventListener('click', function () {
       clearError(); var file = byId('holidayScreenshot').files[0];
@@ -130,25 +212,23 @@
         invokeServer('processHolidayScreenshot', { runId: state.validation && state.validation.runId,
           imageData: reader.result, fileName: file.name, contentType: file.type }).then(function (result) {
           if (result.evidence && result.evidence.evidenceId) state.evidenceIds.push(result.evidence.evidenceId);
-          showMatches(result.matchReport); setStatus('');
-        }).catch(function (error) { showError(error.message || error); state.ocrUnresolvedCount++; updateUnresolved(); refreshApproval(); setStatus(''); });
-      }; reader.onerror = function () { showError('The screenshot could not be read.'); state.ocrUnresolvedCount++; updateUnresolved(); refreshApproval(); };
+          showMatches(result.matchReport, result.evidence && result.evidence.evidenceId); setStatus('');
+        }).catch(function (error) { showError(error.message || error); recordFailedAttempt(); setStatus(''); });
+      }; reader.onerror = function () { showError('The screenshot could not be read.'); recordFailedAttempt(); };
       reader.readAsDataURL(file);
     });
-    byId('confirmMatches').addEventListener('click', function () {
-      var ids = (state.matchReport.matches || []).map(function (match) { return match.employeeId; });
-      ids.forEach(function (id) { state.selected[id] = true; state.confirmedOcrIds.push(id); });
-      state.ocrUnresolvedCount = Math.max(0, state.ocrUnresolvedCount - ids.length); updateUnresolved(); renderEmployees();
-      byId('matchResults').textContent = 'Confirmed American names added to the selection. Resolve any remaining ambiguous or unmatched names manually.';
-      byId('confirmMatches').disabled = true; refreshApproval();
-    });
-    byId('resolveOcrManually').addEventListener('click', function () {
-      var ids = selectedIds();
-      if (!state.manualIssueCount || !ids.length) { showError('Select the American name or names that resolve the remaining OCR entries.'); return; }
-      state.confirmedOcrIds = state.confirmedOcrIds.concat(ids);
-      state.ocrUnresolvedCount = Math.max(0, state.ocrUnresolvedCount - state.manualIssueCount); state.manualIssueCount = 0; updateUnresolved();
-      byId('matchResults').textContent = 'Ambiguous and unmatched OCR entries were resolved using the selected American names.';
-      updateManualResolveButton(); refreshApproval();
+    byId('matchResults').addEventListener('click', function (event) {
+      var confirm = event.target.closest('[data-confirm-attempt]');
+      if (confirm) {
+        addConfirmedIds(ocrAttempts.confirmMatches(confirm.dataset.confirmAttempt));
+        renderEmployees(); renderMatchAttempts(); return;
+      }
+      var resolve = event.target.closest('[data-resolve-attempt]');
+      if (resolve) {
+        var ids = ocrAttempts.resolveManual(resolve.dataset.resolveAttempt, Number(resolve.dataset.issueIndex), selectedIds());
+        if (!ids.length) { showError('Select American names before resolving this attempt.'); return; }
+        addConfirmedIds(ids); renderEmployees(); renderMatchAttempts();
+      }
     });
     byId('saveDecisions').addEventListener('click', function () {
       if (state.unresolvedDecisions || state.blockingErrors.length) { showError('Resolve blocking validation and OCR issues before continuing.'); return; }
