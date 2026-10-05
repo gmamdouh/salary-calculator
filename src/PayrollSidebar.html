@@ -24,7 +24,12 @@
         <label>Holiday <select id="holidayId"><option value="">Choose a holiday when one applies</option></select></label>
         <button type="button" id="loadSetup">Load setup</button>
       </section>
-      <section class="panel" id="panel-validate" data-panel="validate" hidden><h2>Validate</h2><div id="validationSummary"></div><button type="button" id="validateRun">Validate sources</button></section>
+      <section class="panel" id="panel-validate" data-panel="validate" hidden>
+        <h2>Validate</h2><div id="validationSummary"></div><div id="partialDepartmentDetails" class="errors" role="status" aria-live="polite"></div>
+        <label id="partialDepartmentAckLabel" hidden><input id="partialDepartmentAck" type="checkbox"> I reviewed and acknowledge the departments omitted from this partial payroll run.</label>
+        <button type="button" id="validateRun">Validate sources</button>
+        <button type="button" id="continuePartialRun" hidden disabled>Continue with healthy departments</button>
+      </section>
       <section class="panel" id="panel-decisions" data-panel="decisions" hidden>
         <h2>Holiday decisions</h2>
         <label><input id="holidayApplies" type="checkbox"> This holiday applies</label>

@@ -70,13 +70,15 @@ SalaryCalculator.PayrollOrchestrator = (function () {
               if (ids[employee.employeeId]) throw Object.assign(new Error('Employee ID occurs more than once'), { issues: [issue('DUPLICATE_EMPLOYEE_ID', 'Employee ID occurs more than once.', department, { employeeId: employee.employeeId })] });
               ids[employee.employeeId] = true;
             });
-            var attendance = SalaryCalculator.MappingConfig.normalizeAttendance(bundle.attendanceRows, config, period);
-            attendance.forEach(function (record) {
-              if (!ids[record.employeeId]) throw Object.assign(new Error('Attendance Employee ID is absent from employee source'), { issues: [issue('UNMATCHED_EMPLOYEE_ID', 'Attendance Employee ID is absent from employee source.', department, { employeeId: record.employeeId })] });
-            });
+            // Preserve the normalized roster before attendance validation so a later attendance
+            // failure cannot hide IDs that collide with another department's roster.
             deptEmployees.forEach(function (employee) {
               employees.push({ employeeId: employee.employeeId, americanName: employee.americanName, department: department });
               inputs.push(employee);
+            });
+            var attendance = SalaryCalculator.MappingConfig.normalizeAttendance(bundle.attendanceRows, config, period);
+            attendance.forEach(function (record) {
+              if (!ids[record.employeeId]) throw Object.assign(new Error('Attendance Employee ID is absent from employee source'), { issues: [issue('UNMATCHED_EMPLOYEE_ID', 'Attendance Employee ID is absent from employee source.', department, { employeeId: record.employeeId })] });
             });
             attendanceByDepartment[department] = attendance;
           } catch (error) {
@@ -135,6 +137,10 @@ SalaryCalculator.PayrollOrchestrator = (function () {
     function calculateDraft(request) {
       var report = validateRequest(request);
       if (!report.valid || !report.inputs.length) return { valid: false, state: 'BLOCKED', runId: report.runId || null, errors: report.errors, warnings: report.warnings || [] };
+      if (report.failedDepartments.length && !(request.acknowledgements && request.acknowledgements.partialDepartments === true)) {
+        return { valid: false, state: 'BLOCKED', runId: report.runId,
+          errors: [issue('PARTIAL_DEPARTMENTS_ACK_REQUIRED', 'Review and acknowledge failed departments before drafting.')], warnings: [] };
+      }
       var decisions = copy(request.decisions || report.decisions || {});
       if (report.decisionRequirements && report.decisionRequirements.length) {
         return { valid: false, state: 'BLOCKED', runId: request.runId || report.runId,
@@ -219,6 +225,10 @@ SalaryCalculator.PayrollOrchestrator = (function () {
     function approveRun(id, approver) {
       try {
         var run = repository.getRun(id);
+        if ((run.failedDepartments || []).length && !(run.acknowledgements && run.acknowledgements.partialDepartments === true)) {
+          return { valid: false, state: run.state, runId: id,
+            errors: [issue('PARTIAL_DEPARTMENTS_ACK_REQUIRED', 'This partial run has no saved acknowledgment of omitted departments.') ] };
+        }
         if (unresolvedOcr(run.decisions || {})) return { valid: false, state: run.state, runId: id,
           errors: [issue('OCR_UNRESOLVED', 'Resolve all ambiguous, unmatched, and unconfirmed OCR entries before approval.')] };
         return repository.approve(id, approver || actor());

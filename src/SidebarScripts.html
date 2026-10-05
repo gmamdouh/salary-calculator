@@ -47,10 +47,40 @@
     }
     return { create: create };
   })();
+  var PayrollSidebarPartialRunNotice = (function () {
+    function create() {
+      var failedDepartments = [], departmentErrors = [], acknowledged = false;
+      function detailsFor(department) {
+        return departmentErrors.filter(function (item) { return item.department === department; })
+          .map(function (item) { return item.message || item.code || 'Department validation failed'; });
+      }
+      return {
+        setReport: function (report) {
+          report = report || {};
+          failedDepartments = (report.failedDepartments || []).slice();
+          departmentErrors = (report.departmentErrors || []).slice();
+          acknowledged = false;
+        },
+        message: function () {
+          var details = failedDepartments.map(function (department) {
+            var reasons = detailsFor(department);
+            return department + ' omitted — ' + (reasons.length ? reasons.join('; ') : 'Department validation failed') + '.';
+          }).join('\n');
+          return details ? 'Partial payroll: ' + details : '';
+        },
+        isRequired: function () { return failedDepartments.length > 0; },
+        setAcknowledged: function (value) { acknowledged = value === true; },
+        canContinue: function () { return !failedDepartments.length || acknowledged; },
+        acknowledgements: function () { return { partialDepartments: acknowledged }; }
+      };
+    }
+    return { create: create };
+  })();
 </script>
 <script>
   (function () {
     var ocrAttempts = PayrollSidebarOcrAttemptTracker.create();
+    var partialRunNotice = PayrollSidebarPartialRunNotice.create();
     var state = { setup: null, validation: null, employees: [], selected: {}, employeeDecisions: {},
       confirmedOcrIds: [], evidenceIds: [], decisions: null, draft: null, blockingErrors: [], unresolvedDecisions: 0,
       validationUnresolvedCount: 0 };
@@ -193,8 +223,15 @@
         return !Number.isNaN(edited) && edited !== original && !byId(input.dataset.reasonId).value.trim();
       });
     }
-    function canApprove() { return !state.blockingErrors.length && state.unresolvedDecisions === 0 && !missingOverrideReasons() && !!state.draft; }
+    function canApprove() { return !state.blockingErrors.length && state.unresolvedDecisions === 0 && !missingOverrideReasons() &&
+      partialRunNotice.canContinue() && !!state.draft; }
     function refreshApproval() { var button = byId('approveRun'); if (button) button.disabled = !canApprove(); }
+    function renderApprovalSummary(message) {
+      var summary = byId('approvalSummary');
+      summary.textContent = (partialRunNotice.message() ? 'Partial payroll — omitted departments:\n' +
+        partialRunNotice.message() + '\n\n' : '') + message;
+      summary.style.whiteSpace = 'pre-line';
+    }
     function renderDraft(result) {
       state.draft = result; state.blockingErrors = result && (result.errors || result.blockingErrors) || [];
       var container = byId('draftRows'); container.textContent = '';
@@ -211,6 +248,7 @@
           container.appendChild(row);
         });
       });
+      if (result && result.valid !== false) renderApprovalSummary('Draft is ready for review.');
       refreshApproval();
     }
     byId('loadSetup').addEventListener('click', function () {
@@ -228,11 +266,28 @@
       invokeServer('validateRun', request).then(function (result) {
         state.validation = result || {}; state.employees = result.employees || state.employees;
         state.blockingErrors = result.errors || result.blockingErrors || [];
+        partialRunNotice.setReport(result);
+        byId('partialDepartmentDetails').textContent = partialRunNotice.message();
+        byId('partialDepartmentAckLabel').hidden = !partialRunNotice.isRequired();
+        byId('partialDepartmentAck').checked = false;
+        byId('continuePartialRun').hidden = !partialRunNotice.isRequired();
+        byId('continuePartialRun').disabled = partialRunNotice.isRequired();
         renderEligibilityDecisions(result.decisionRequirements || []);
-        byId('validationSummary').textContent = state.blockingErrors.length ? 'Blocking validation errors: ' + state.blockingErrors.length : 'Sources validated.';
-        if (state.blockingErrors.length) showError(state.blockingErrors); else { renderEmployees(); goTo('decisions'); }
+        byId('validationSummary').textContent = state.blockingErrors.length ? 'Blocking validation errors: ' + state.blockingErrors.length :
+          (partialRunNotice.isRequired() ? 'Some departments failed; review the omitted departments below.' : 'Sources validated.');
+        if (state.blockingErrors.length) showError(state.blockingErrors);
+        else if (!partialRunNotice.isRequired()) { renderEmployees(); goTo('decisions'); }
         setStatus('');
       }).catch(function (error) { showError(error.message || error); setStatus(''); });
+    });
+    byId('partialDepartmentAck').addEventListener('change', function () {
+      partialRunNotice.setAcknowledged(byId('partialDepartmentAck').checked);
+      byId('continuePartialRun').disabled = !partialRunNotice.canContinue();
+      refreshApproval();
+    });
+    byId('continuePartialRun').addEventListener('click', function () {
+      if (!partialRunNotice.canContinue()) { showError('Review and acknowledge the omitted departments before continuing.'); return; }
+      renderEmployees(); goTo('decisions');
     });
     byId('employeeSearch').addEventListener('input', renderEmployees);
     byId('selectAllSurvey').addEventListener('click', function () { selectDepartment('SURVEY'); });
@@ -274,11 +329,13 @@
     });
     byId('saveDecisions').addEventListener('click', function () {
       if (state.unresolvedDecisions || state.blockingErrors.length) { showError('Resolve blocking validation and OCR issues before continuing.'); return; }
+      if (!partialRunNotice.canContinue()) { showError('Review and acknowledge the omitted departments before continuing.'); return; }
       state.decisions = decisionPayload(); goTo('draft');
     });
     byId('calculateDraft').addEventListener('click', function () {
       clearError(); var request = { payrollMonth: byId('payrollMonth').value, cutoffMode: byId('cutoffMode').value,
-        departmentScope: [byId('department').value], runId: state.validation && state.validation.runId, decisions: state.decisions };
+        departmentScope: [byId('department').value], runId: state.validation && state.validation.runId, decisions: state.decisions,
+        acknowledgements: partialRunNotice.acknowledgements() };
       invokeServer('calculateDraft', request).then(renderDraft).catch(function (error) { showError(error.message || error); });
     });
     byId('saveDraftEdits').addEventListener('click', function () {
@@ -290,7 +347,7 @@
         return invokeServer('saveOverride', { runId: state.draft.runId, employeeId: row.dataset.employeeId,
           component: row.dataset.component, value: Number(input.value), reason: byId(input.dataset.reasonId).value.trim() });
       }); });
-      chain.then(function () { goTo('approve'); byId('approvalSummary').textContent = 'Draft is ready for review.'; refreshApproval(); })
+      chain.then(function () { goTo('approve'); renderApprovalSummary('Draft is ready for review.'); refreshApproval(); })
         .catch(function (error) { showError(error.message || error); });
     });
     byId('approveRun').addEventListener('click', function () {

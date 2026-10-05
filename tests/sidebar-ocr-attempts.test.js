@@ -12,6 +12,40 @@ function createTracker() {
   return context.PayrollSidebarOcrAttemptTracker.create();
 }
 
+function createPartialRunNotice() {
+  const html = fs.readFileSync(require.resolve('../src/SidebarScripts.html'), 'utf8');
+  const firstScript = html.match(/<script>([\s\S]*?)<\/script>/);
+  const context = vm.createContext({});
+  vm.runInContext(firstScript[1], context);
+  return context.PayrollSidebarPartialRunNotice.create();
+}
+
+test('partial All-run failures are named with reasons and require explicit acknowledgment', () => {
+  const notice = createPartialRunNotice();
+  notice.setReport({ failedDepartments: ['RESERVATIONS'], departmentErrors: [
+    { department: 'RESERVATIONS', message: 'Reservations workbook unavailable' }
+  ] });
+
+  assert.equal(notice.message(), 'Partial payroll: RESERVATIONS omitted — Reservations workbook unavailable.');
+  assert.equal(notice.isRequired(), true);
+  assert.equal(notice.canContinue(), false);
+  notice.setAcknowledged(true);
+  assert.equal(notice.canContinue(), true);
+  assert.equal(notice.acknowledgements().partialDepartments, true);
+});
+
+test('partial-run details are rendered before the sidebar allows draft or approval', () => {
+  const sidebar = fs.readFileSync(require.resolve('../src/PayrollSidebar.html'), 'utf8');
+  const scripts = fs.readFileSync(require.resolve('../src/SidebarScripts.html'), 'utf8');
+  assert.match(sidebar, /id="partialDepartmentDetails"/);
+  assert.match(sidebar, /id="partialDepartmentAck"/);
+  assert.match(sidebar, /id="continuePartialRun"/);
+  assert.match(scripts, /partialRunNotice\.message\(\)/);
+  assert.match(scripts, /partialRunNotice\.canContinue\(\)/);
+  assert.match(scripts, /acknowledgements: partialRunNotice\.acknowledgements\(\)/);
+  assert.match(scripts, /Partial payroll — omitted departments/);
+});
+
 test('new name reports retain earlier unresolved attempts independently', () => {
   const tracker = createTracker();
   const first = tracker.add({ matches: [{ employeeId: 'EMP-1', americanName: 'Alex Smith' }], ambiguous: [], unmatched: [] });

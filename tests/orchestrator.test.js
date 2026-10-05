@@ -84,12 +84,40 @@ test('All mode drafts healthy departments and returns failed department errors',
   assert.equal(validation.valid, true);
   assert.equal(validation.failedDepartments.includes('RESERVATIONS'), true);
   assert.equal(validation.errors.some(error => error.department === 'RESERVATIONS'), true);
-  const draft = orchestrator.calculateDraft(request);
+  const draft = orchestrator.calculateDraft({ ...request, acknowledgements: { partialDepartments: true } });
   assert.equal(draft.valid, true, JSON.stringify(plain(draft)));
   assert.equal(draft.failedDepartments.includes('RESERVATIONS'), true);
   assert.equal(draft.departmentErrors.some(error => error.department === 'RESERVATIONS'), true);
+  assert.deepEqual(plain(draft.acknowledgements), { partialDepartments: true });
   assert.deepEqual(plain(draft.results.map(result => result.department)), ['SURVEY']);
   assert.equal(calls.some(call => call[0] === 'draft'), true);
+});
+
+test('All-mode partial draft requires an explicit acknowledgement of omitted departments', () => {
+  const base = fixture();
+  const reservations = { ...base.config, department: 'RESERVATIONS' };
+  const { orchestrator, calls } = fixture({ configs: [base.config, reservations], readDepartment(config, period, employeeRow, attendanceRow) {
+    if (config.department === 'RESERVATIONS') throw new Error('Reservations workbook unavailable');
+    return { department: config.department, period, employeeRows: [employeeRow], attendanceRows: [attendanceRow] };
+  } });
+  const request = { payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['ALL'] };
+  const unacknowledged = orchestrator.calculateDraft(request);
+  assert.equal(unacknowledged.valid, false);
+  assert.equal(unacknowledged.errors[0].code, 'PARTIAL_DEPARTMENTS_ACK_REQUIRED');
+  assert.equal(calls.some(call => call[0] === 'draft'), false);
+
+  const acknowledged = orchestrator.calculateDraft({ ...request, acknowledgements: { partialDepartments: true } });
+  assert.equal(acknowledged.valid, true, JSON.stringify(plain(acknowledged)));
+  assert.deepEqual(plain(acknowledged.acknowledgements), { partialDepartments: true });
+});
+
+test('approval blocks a partial run without its persisted omission acknowledgment', () => {
+  const { orchestrator, repository, calls } = fixture();
+  repository.getRun = () => ({ runId: 'RUN-PARTIAL', state: 'DRAFT', failedDepartments: ['RESERVATIONS'], acknowledgements: {} });
+  const result = orchestrator.approveRun('RUN-PARTIAL', 'approver@example.test');
+  assert.equal(result.valid, false);
+  assert.equal(result.errors[0].code, 'PARTIAL_DEPARTMENTS_ACK_REQUIRED');
+  assert.equal(calls.some(call => call[0] === 'approve'), false);
 });
 
 test('a single invalid department still blocks draft creation', () => {
@@ -122,9 +150,32 @@ test('cross-department Employee ID collisions exclude every affected department 
   assert.deepEqual(plain(validation.employees.map(employee => employee.department)), ['MANAGEMENT']);
   assert.equal(validation.attendanceByEmployee['EMP-001'], undefined);
   assert.equal(validation.attendanceByEmployee['EMP-003'][0].status, 'PRESENT');
-  const draft = orchestrator.calculateDraft(request);
+  const draft = orchestrator.calculateDraft({ ...request, acknowledgements: { partialDepartments: true } });
   assert.equal(draft.valid, true, JSON.stringify(plain(draft)));
   assert.deepEqual(plain(draft.results.map(result => result.employeeId)), ['EMP-003']);
+});
+
+test('roster collisions quarantine departments even when one later fails attendance normalization', () => {
+  const base = fixture();
+  const reservations = { ...base.config, department: 'RESERVATIONS' };
+  const management = { ...base.config, department: 'MANAGEMENT' };
+  const { orchestrator } = fixture({ configs: [base.config, reservations, management], readDepartment(config, period, employeeRow, attendanceRow) {
+    const employeeId = config.department === 'MANAGEMENT' ? 'EMP-003' : 'EMP-001';
+    const name = config.department === 'SURVEY' ? 'Survey Alex' : config.department === 'RESERVATIONS' ? 'Reservation Alex' : 'Morgan Manager';
+    const employee = { ...employeeRow, values: [employeeId, name, '2026-08-01', 10], displayValues: [employeeId, name, '2026-08-01', '10'] };
+    const attendance = config.department === 'SURVEY'
+      ? { ...attendanceRow, values: ['MISSING-EMPLOYEE', '2026-09-01', 'PRESENT'], displayValues: ['MISSING-EMPLOYEE', '2026-09-01', 'PRESENT'] }
+      : { ...attendanceRow, values: [employeeId, '2026-09-01', 'PRESENT'], displayValues: [employeeId, '2026-09-01', 'PRESENT'] };
+    return { department: config.department, period, employeeRows: [employee], attendanceRows: [attendance] };
+  } });
+  const report = orchestrator.validateRequest({ payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['ALL'] });
+
+  assert.equal(report.valid, true);
+  assert.equal(report.failedDepartments.includes('SURVEY'), true);
+  assert.equal(report.failedDepartments.includes('RESERVATIONS'), true);
+  assert.equal(report.errors.some(error => error.code === 'UNMATCHED_EMPLOYEE_ID' && error.department === 'SURVEY'), true);
+  assert.deepEqual(plain(report.errors.filter(error => error.code === 'CROSS_DEPARTMENT_EMPLOYEE_ID').map(error => error.department).sort()), ['RESERVATIONS', 'SURVEY']);
+  assert.deepEqual(plain(report.employees.map(employee => employee.department)), ['MANAGEMENT']);
 });
 
 test('a valid draft is calculated and persisted with its source snapshot and server actor', () => {
