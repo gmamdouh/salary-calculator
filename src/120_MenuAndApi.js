@@ -109,7 +109,8 @@ SalaryCalculator.MenuAndApi = (function () {
         return { valid: true, runId: result.runId, state: result.state, payrollMonth: result.payrollMonth,
           cutoff: result.cutoff, results: result.results, errors: result.errors || [], blockingErrors: result.blockingErrors || [],
           failedDepartments: result.failedDepartments || [], departmentErrors: result.departmentErrors || [],
-          warnings: result.warnings || [] };
+          partialDepartmentsFingerprint: result.partialDepartmentsFingerprint || null,
+          acknowledgements: result.acknowledgements || {}, warnings: result.warnings || [] };
       });
     }
     return {
@@ -130,7 +131,8 @@ SalaryCalculator.MenuAndApi = (function () {
           return { valid: result.valid, runId: result.runId, payrollMonth: result.payrollMonth,
             cutoff: result.period && result.period.endDate, employees: result.employees || [],
             errors: result.valid ? [] : result.errors || [], departmentErrors: result.valid ? result.errors || [] : [],
-            failedDepartments: result.failedDepartments || [], warnings: result.warnings || [],
+            failedDepartments: result.failedDepartments || [], partialDepartmentsFingerprint: result.partialDepartmentsFingerprint || null,
+            warnings: result.warnings || [],
             unresolvedDecisionCount: result.unresolvedDecisionCount || 0,
             decisionRequirements: result.decisionRequirements || [] };
         });

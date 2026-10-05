@@ -49,7 +49,7 @@
   })();
   var PayrollSidebarPartialRunNotice = (function () {
     function create() {
-      var failedDepartments = [], departmentErrors = [], acknowledged = false;
+      var failedDepartments = [], departmentErrors = [], fingerprint = null, acknowledgedFingerprint = null;
       function detailsFor(department) {
         return departmentErrors.filter(function (item) { return item.department === department; })
           .map(function (item) { return item.message || item.code || 'Department validation failed'; });
@@ -59,7 +59,8 @@
           report = report || {};
           failedDepartments = (report.failedDepartments || []).slice();
           departmentErrors = (report.departmentErrors || []).slice();
-          acknowledged = false;
+          fingerprint = report.partialDepartmentsFingerprint || null;
+          acknowledgedFingerprint = null;
         },
         message: function () {
           var details = failedDepartments.map(function (department) {
@@ -69,9 +70,9 @@
           return details ? 'Partial payroll: ' + details : '';
         },
         isRequired: function () { return failedDepartments.length > 0; },
-        setAcknowledged: function (value) { acknowledged = value === true; },
-        canContinue: function () { return !failedDepartments.length || acknowledged; },
-        acknowledgements: function () { return { partialDepartments: acknowledged }; }
+        setAcknowledged: function (value) { acknowledgedFingerprint = value === true ? fingerprint : null; },
+        canContinue: function () { return !failedDepartments.length || !!fingerprint && acknowledgedFingerprint === fingerprint; },
+        acknowledgements: function () { return { partialDepartmentsFingerprint: acknowledgedFingerprint }; }
       };
     }
     return { create: create };
@@ -233,6 +234,24 @@
       summary.style.whiteSpace = 'pre-line';
     }
     function renderDraft(result) {
+      if (result && result.errors && result.errors.some(function (item) { return item.code === 'ACK_REQUIRED'; })) {
+        partialRunNotice.setReport(result);
+        if (Array.isArray(result.employees)) {
+          state.employees = result.employees;
+          var currentEmployeeIds = Object.create(null);
+          state.employees.forEach(function (employee) { currentEmployeeIds[employee.employeeId] = true; });
+          Object.keys(state.selected).forEach(function (employeeId) {
+            if (!currentEmployeeIds[employeeId]) delete state.selected[employeeId];
+          });
+        }
+        byId('partialDepartmentDetails').textContent = partialRunNotice.message();
+        byId('partialDepartmentAckLabel').hidden = !partialRunNotice.isRequired();
+        byId('partialDepartmentAck').checked = false;
+        byId('continuePartialRun').hidden = !partialRunNotice.isRequired();
+        byId('continuePartialRun').disabled = partialRunNotice.isRequired();
+        byId('validationSummary').textContent = 'Department failures changed; review and acknowledge the updated report before continuing.';
+        state.draft = null; state.blockingErrors = []; goTo('validate'); refreshApproval(); return;
+      }
       state.draft = result; state.blockingErrors = result && (result.errors || result.blockingErrors) || [];
       var container = byId('draftRows'); container.textContent = '';
       if (state.blockingErrors.length) showError(state.blockingErrors);

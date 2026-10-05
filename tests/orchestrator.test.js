@@ -20,7 +20,7 @@ function fixture(options = {}) {
   const calls = [];
   const configs = options.configs || [config];
   const sourceGateway = {
-    validateAccess(c) { return options.validateAccess ? options.validateAccess(c) : { valid: true, errors: [], warnings: [] }; },
+    validateAccess(c, kind) { return options.validateAccess ? options.validateAccess(c, kind) : { valid: true, errors: [], warnings: [] }; },
     readDepartment(c, p) {
       calls.push(['read', c.department]);
       if (options.readDepartment) return options.readDepartment(c, p, rawEmployee, rawAttendance);
@@ -28,6 +28,8 @@ function fixture(options = {}) {
     },
     writeApprovalState(c, writes) { calls.push(['write', c.department, writes]); return { valid: true, errors: [] }; }
   };
+  if (options.readEmployeeRoster) sourceGateway.readEmployeeRoster = (c, p) => options.readEmployeeRoster(c, p, rawEmployee);
+  if (options.readAttendanceRows) sourceGateway.readAttendanceRows = (c, p) => options.readAttendanceRows(c, p, rawAttendance);
   const repository = options.repository || {
     createDraft(run) { calls.push(['draft', run]); return { ...run, state: 'DRAFT', revision: 1 }; },
     getRun(id) { return this.run; },
@@ -84,11 +86,12 @@ test('All mode drafts healthy departments and returns failed department errors',
   assert.equal(validation.valid, true);
   assert.equal(validation.failedDepartments.includes('RESERVATIONS'), true);
   assert.equal(validation.errors.some(error => error.department === 'RESERVATIONS'), true);
-  const draft = orchestrator.calculateDraft({ ...request, acknowledgements: { partialDepartments: true } });
+  const draft = orchestrator.calculateDraft({ ...request, acknowledgements: { partialDepartmentsFingerprint: validation.partialDepartmentsFingerprint } });
   assert.equal(draft.valid, true, JSON.stringify(plain(draft)));
   assert.equal(draft.failedDepartments.includes('RESERVATIONS'), true);
   assert.equal(draft.departmentErrors.some(error => error.department === 'RESERVATIONS'), true);
-  assert.deepEqual(plain(draft.acknowledgements), { partialDepartments: true });
+  assert.equal(draft.acknowledgements.partialDepartmentsFingerprint, validation.partialDepartmentsFingerprint);
+  assert.equal(draft.acknowledgements.partialDepartmentsReport.fingerprint, validation.partialDepartmentsFingerprint);
   assert.deepEqual(plain(draft.results.map(result => result.department)), ['SURVEY']);
   assert.equal(calls.some(call => call[0] === 'draft'), true);
 });
@@ -101,14 +104,55 @@ test('All-mode partial draft requires an explicit acknowledgement of omitted dep
     return { department: config.department, period, employeeRows: [employeeRow], attendanceRows: [attendanceRow] };
   } });
   const request = { payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['ALL'] };
-  const unacknowledged = orchestrator.calculateDraft(request);
+  const unacknowledged = orchestrator.calculateDraft({ ...request, acknowledgements: { partialDepartments: true } });
   assert.equal(unacknowledged.valid, false);
-  assert.equal(unacknowledged.errors[0].code, 'PARTIAL_DEPARTMENTS_ACK_REQUIRED');
+  assert.equal(unacknowledged.errors[0].code, 'ACK_REQUIRED');
   assert.equal(calls.some(call => call[0] === 'draft'), false);
 
-  const acknowledged = orchestrator.calculateDraft({ ...request, acknowledgements: { partialDepartments: true } });
+  const report = orchestrator.validateRequest(request);
+  const acknowledged = orchestrator.calculateDraft({ ...request, acknowledgements: { partialDepartmentsFingerprint: report.partialDepartmentsFingerprint } });
   assert.equal(acknowledged.valid, true, JSON.stringify(plain(acknowledged)));
-  assert.deepEqual(plain(acknowledged.acknowledgements), { partialDepartments: true });
+  assert.equal(acknowledged.acknowledgements.partialDepartmentsFingerprint, report.partialDepartmentsFingerprint);
+});
+
+test('partial-department acknowledgment is bound to the exact revalidated report', () => {
+  const base = fixture();
+  const reservations = { ...base.config, department: 'RESERVATIONS' };
+  let reservationFailure = 'Reservations workbook unavailable';
+  const { orchestrator, repository, calls } = fixture({ configs: [base.config, reservations], readDepartment(config, period, employeeRow, attendanceRow) {
+    if (config.department === 'RESERVATIONS') throw new Error(reservationFailure);
+    return { department: config.department, period, employeeRows: [employeeRow], attendanceRows: [attendanceRow] };
+  } });
+  const request = { payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['ALL'] };
+  const firstReport = orchestrator.validateRequest(request);
+  const repeatedReport = orchestrator.validateRequest(request);
+  assert.equal(typeof firstReport.partialDepartmentsFingerprint, 'string');
+  assert.equal(firstReport.partialDepartmentsFingerprint, repeatedReport.partialDepartmentsFingerprint);
+
+  reservationFailure = 'Reservations workbook permissions changed';
+  const staleAck = orchestrator.calculateDraft({ ...request, acknowledgements: {
+    partialDepartmentsFingerprint: firstReport.partialDepartmentsFingerprint
+  } });
+  assert.equal(staleAck.valid, false);
+  assert.equal(staleAck.errors[0].code, 'ACK_REQUIRED');
+  assert.notEqual(staleAck.partialDepartmentsFingerprint, firstReport.partialDepartmentsFingerprint);
+  assert.equal(staleAck.departmentErrors.some(error => error.message === reservationFailure), true);
+
+  const currentAck = orchestrator.calculateDraft({ ...request, acknowledgements: {
+    partialDepartmentsFingerprint: staleAck.partialDepartmentsFingerprint
+  } });
+  assert.equal(currentAck.valid, true, JSON.stringify(plain(currentAck)));
+  assert.equal(currentAck.acknowledgements.partialDepartmentsFingerprint, staleAck.partialDepartmentsFingerprint);
+  assert.equal(currentAck.acknowledgements.partialDepartmentsReport.fingerprint, staleAck.partialDepartmentsFingerprint);
+  const savedRun = calls.find(call => call[0] === 'draft')[1];
+  assert.equal(savedRun.partialDepartmentsFingerprint, staleAck.partialDepartmentsFingerprint);
+  repository.getRun = () => ({ ...savedRun, departmentErrors: savedRun.departmentErrors.concat({
+    department: 'RESERVATIONS', code: 'NEW_ERROR', message: 'Altered after draft'
+  }) });
+  const alteredApproval = orchestrator.approveRun(savedRun.runId, 'approver@example.test');
+  assert.equal(alteredApproval.valid, false);
+  assert.equal(alteredApproval.errors[0].code, 'ACK_REQUIRED');
+  assert.equal(calls.some(call => call[0] === 'approve'), false);
 });
 
 test('approval blocks a partial run without its persisted omission acknowledgment', () => {
@@ -116,7 +160,7 @@ test('approval blocks a partial run without its persisted omission acknowledgmen
   repository.getRun = () => ({ runId: 'RUN-PARTIAL', state: 'DRAFT', failedDepartments: ['RESERVATIONS'], acknowledgements: {} });
   const result = orchestrator.approveRun('RUN-PARTIAL', 'approver@example.test');
   assert.equal(result.valid, false);
-  assert.equal(result.errors[0].code, 'PARTIAL_DEPARTMENTS_ACK_REQUIRED');
+  assert.equal(result.errors[0].code, 'ACK_REQUIRED');
   assert.equal(calls.some(call => call[0] === 'approve'), false);
 });
 
@@ -150,7 +194,7 @@ test('cross-department Employee ID collisions exclude every affected department 
   assert.deepEqual(plain(validation.employees.map(employee => employee.department)), ['MANAGEMENT']);
   assert.equal(validation.attendanceByEmployee['EMP-001'], undefined);
   assert.equal(validation.attendanceByEmployee['EMP-003'][0].status, 'PRESENT');
-  const draft = orchestrator.calculateDraft({ ...request, acknowledgements: { partialDepartments: true } });
+  const draft = orchestrator.calculateDraft({ ...request, acknowledgements: { partialDepartmentsFingerprint: validation.partialDepartmentsFingerprint } });
   assert.equal(draft.valid, true, JSON.stringify(plain(draft)));
   assert.deepEqual(plain(draft.results.map(result => result.employeeId)), ['EMP-003']);
 });
@@ -176,6 +220,39 @@ test('roster collisions quarantine departments even when one later fails attenda
   assert.equal(report.errors.some(error => error.code === 'UNMATCHED_EMPLOYEE_ID' && error.department === 'SURVEY'), true);
   assert.deepEqual(plain(report.errors.filter(error => error.code === 'CROSS_DEPARTMENT_EMPLOYEE_ID').map(error => error.department).sort()), ['RESERVATIONS', 'SURVEY']);
   assert.deepEqual(plain(report.employees.map(employee => employee.department)), ['MANAGEMENT']);
+});
+
+test('roster collisions are detected before attendance access preflight can fail', () => {
+  const base = fixture();
+  const reservations = { ...base.config, department: 'RESERVATIONS' };
+  const management = { ...base.config, department: 'MANAGEMENT' };
+  const attendanceReads = [];
+  const { orchestrator } = fixture({ configs: [base.config, reservations, management],
+    validateAccess(config, kind) {
+      if (kind === 'attendance' && config.department === 'SURVEY') return { valid: false,
+        errors: [{ code: 'ATTENDANCE_ACCESS_ERROR', message: 'Survey attendance tab cannot be read' }] };
+      return { valid: true, errors: [] };
+    },
+    readEmployeeRoster(config, period, employeeRow) {
+      const id = config.department === 'MANAGEMENT' ? 'EMP-003' : 'EMP-001';
+      const name = config.department === 'SURVEY' ? 'Survey Alex' : config.department === 'RESERVATIONS' ? 'Reservation Alex' : 'Morgan Manager';
+      return [{ ...employeeRow, values: [id, name, '2026-08-01', 10], displayValues: [id, name, '2026-08-01', '10'] }];
+    },
+    readAttendanceRows(config, period, attendanceRow) {
+      attendanceReads.push(config.department);
+      const id = config.department === 'MANAGEMENT' ? 'EMP-003' : 'EMP-001';
+      return [{ ...attendanceRow, values: [id, '2026-09-01', 'PRESENT'], displayValues: [id, '2026-09-01', 'PRESENT'] }];
+    }
+  });
+  const report = orchestrator.validateRequest({ payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['ALL'] });
+
+  assert.equal(report.valid, true);
+  assert.equal(report.failedDepartments.includes('SURVEY'), true);
+  assert.equal(report.failedDepartments.includes('RESERVATIONS'), true);
+  assert.equal(report.errors.some(error => error.code === 'ATTENDANCE_ACCESS_ERROR' && error.department === 'SURVEY'), true);
+  assert.deepEqual(plain(report.errors.filter(error => error.code === 'CROSS_DEPARTMENT_EMPLOYEE_ID').map(error => error.department).sort()), ['RESERVATIONS', 'SURVEY']);
+  assert.deepEqual(plain(report.employees.map(employee => employee.department)), ['MANAGEMENT']);
+  assert.equal(attendanceReads.includes('SURVEY'), false);
 });
 
 test('a valid draft is calculated and persisted with its source snapshot and server actor', () => {
@@ -308,10 +385,11 @@ test('sidebar API exposes partial department failures separately from blocking e
   const orchestrator = {
     validateRequest: () => ({ valid: true, runId: 'RUN-ALL', payrollMonth: '2026-09', period: { endDate: '2026-09-30' },
       employees: [{ employeeId: 'EMP-SUR', americanName: 'Alex Smith', department: 'SURVEY' }],
-      failedDepartments: ['RESERVATIONS'], errors: departmentErrors, warnings: [] }),
+      failedDepartments: ['RESERVATIONS'], departmentErrors, partialDepartmentsFingerprint: 'partial-api', errors: departmentErrors, warnings: [] }),
     calculateDraft: () => ({ valid: true, runId: 'RUN-ALL', state: 'DRAFT', payrollMonth: '2026-09',
       results: [{ employeeId: 'EMP-SUR', department: 'SURVEY' }], failedDepartments: ['RESERVATIONS'],
-      departmentErrors, errors: [], blockingErrors: [], warnings: [] })
+      departmentErrors, partialDepartmentsFingerprint: 'partial-api', acknowledgements: { partialDepartmentsFingerprint: 'partial-api' },
+      errors: [], blockingErrors: [], warnings: [] })
   };
   const api = MenuAndApi.create({ orchestrator });
   const validation = api.validateRun({ payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['ALL'] });
@@ -320,10 +398,13 @@ test('sidebar API exposes partial department failures separately from blocking e
   assert.deepEqual(plain(validation.errors), []);
   assert.deepEqual(plain(validation.failedDepartments), ['RESERVATIONS']);
   assert.deepEqual(plain(validation.departmentErrors), departmentErrors);
+  assert.equal(validation.partialDepartmentsFingerprint, 'partial-api');
   assert.equal(draft.valid, true);
   assert.deepEqual(plain(draft.failedDepartments), ['RESERVATIONS']);
   assert.deepEqual(plain(draft.departmentErrors), departmentErrors);
   assert.deepEqual(plain(draft.errors), []);
+  assert.equal(draft.partialDepartmentsFingerprint, 'partial-api');
+  assert.equal(draft.acknowledgements.partialDepartmentsFingerprint, 'partial-api');
 });
 
 test('Apps Script globals are available and the custom menu targets the required actions', () => {

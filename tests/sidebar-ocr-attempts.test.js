@@ -22,7 +22,7 @@ function createPartialRunNotice() {
 
 test('partial All-run failures are named with reasons and require explicit acknowledgment', () => {
   const notice = createPartialRunNotice();
-  notice.setReport({ failedDepartments: ['RESERVATIONS'], departmentErrors: [
+  notice.setReport({ failedDepartments: ['RESERVATIONS'], partialDepartmentsFingerprint: 'partial-v1', departmentErrors: [
     { department: 'RESERVATIONS', message: 'Reservations workbook unavailable' }
   ] });
 
@@ -31,7 +31,10 @@ test('partial All-run failures are named with reasons and require explicit ackno
   assert.equal(notice.canContinue(), false);
   notice.setAcknowledged(true);
   assert.equal(notice.canContinue(), true);
-  assert.equal(notice.acknowledgements().partialDepartments, true);
+  assert.equal(notice.acknowledgements().partialDepartmentsFingerprint, 'partial-v1');
+  notice.setReport({ failedDepartments: ['RESERVATIONS', 'SURVEY'], partialDepartmentsFingerprint: 'partial-v2', departmentErrors: [] });
+  assert.equal(notice.canContinue(), false);
+  assert.equal(notice.acknowledgements().partialDepartmentsFingerprint, null);
 });
 
 test('partial-run details are rendered before the sidebar allows draft or approval', () => {

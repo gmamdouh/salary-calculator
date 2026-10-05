@@ -63,9 +63,17 @@ SalaryCalculator.SpreadsheetGateway = (function () {
       if (errors.length) fail(errors);
       return index;
     }
+    function readEmployeeRoster(config) {
+      config = configured(config);
+      return readTable(config, 'employee', Object.create(null)).rows;
+    }
+    function readAttendanceRows(config) {
+      config = configured(config);
+      return readTable(config, 'attendance', Object.create(null)).rows;
+    }
     function readDepartment(config, period) {
       config = configured(config);
-      var books = Object.create(null), employeeTable = readTable(config, 'employee', books), attendanceTable = readTable(config, 'attendance', books);
+      var employeeTable = readTable(config, 'employee', Object.create(null)), attendanceTable = readTable(config, 'attendance', Object.create(null));
       var index = employeeIndex(config, employeeTable);
       var normalized = SalaryCalculator.MappingConfig.normalizeAttendance(attendanceTable.rows, config, period), errors = [];
       normalized.forEach(function (record) {
@@ -77,11 +85,12 @@ SalaryCalculator.SpreadsheetGateway = (function () {
       if (errors.length) fail(errors);
       return { department: config.department, period: period, employeeRows: employeeTable.rows, attendanceRows: attendanceTable.rows };
     }
-    function validateAccess(config) {
+    function validateAccess(config, kind) {
       try {
         config = configured(config);
         var books = Object.create(null);
-        readTable(config, 'employee', books); readTable(config, 'attendance', books);
+        if (!kind || kind === 'employee') readTable(config, 'employee', books);
+        if (!kind || kind === 'attendance') readTable(config, 'attendance', books);
         return { valid: true, errors: [], warnings: [], writeAccessVerified: false };
       } catch (error) {
         return { valid: false, errors: error.issues || [{ code: 'ACCESS_ERROR', message: 'Unable to read configured source workbook' }], warnings: [], writeAccessVerified: false };
@@ -138,7 +147,8 @@ SalaryCalculator.SpreadsheetGateway = (function () {
         return { valid: false, written: written, partial: written > 0, errors: error.issues || [{ code: 'WRITE_ERROR', message: 'Unable to write configured approval state' }] };
       }
     }
-    return { readDepartment: readDepartment, validateAccess: validateAccess, writeApprovalState: writeApprovalState };
+    return { readDepartment: readDepartment, readEmployeeRoster: readEmployeeRoster,
+      readAttendanceRows: readAttendanceRows, validateAccess: validateAccess, writeApprovalState: writeApprovalState };
   }
   return { create: create,
     createMaster: function () {
@@ -180,6 +190,8 @@ SalaryCalculator.SpreadsheetGateway = (function () {
         protectSheet: protectSheet, format: format };
     },
     readDepartment: function (config, period) { return create().readDepartment(config, period); },
-    validateAccess: function (config) { return create().validateAccess(config); },
+    readEmployeeRoster: function (config) { return create().readEmployeeRoster(config); },
+    readAttendanceRows: function (config) { return create().readAttendanceRows(config); },
+    validateAccess: function (config, kind) { return create().validateAccess(config, kind); },
     writeApprovalState: function (config, writes) { return create().writeApprovalState(config, writes); } };
 })();
