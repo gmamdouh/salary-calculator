@@ -64,8 +64,11 @@ test('All departments keeps valid departments available when duplicate IDs block
   const base = fixture();
   const secondConfig = { ...base.config, department: 'RESERVATIONS' };
   const { orchestrator } = fixture({ configs: [base.config, secondConfig], readDepartment(config, period, employeeRow, attendanceRow) {
-    const employeeRows = config.department === 'SURVEY' ? [employeeRow, employeeRow] : [employeeRow];
-    return { department: config.department, period, employeeRows, attendanceRows: [attendanceRow] };
+    const employeeId = config.department === 'SURVEY' ? 'EMP-001' : 'EMP-002';
+    const row = { ...employeeRow, values: [employeeId, 'Alex Smith', '2026-08-01', 10], displayValues: [employeeId, 'Alex Smith', '2026-08-01', '10'] };
+    const employeeRows = config.department === 'SURVEY' ? [row, row] : [row];
+    const attendance = { ...attendanceRow, values: [employeeId, '2026-09-01', 'PRESENT'], displayValues: [employeeId, '2026-09-01', 'PRESENT'] };
+    return { department: config.department, period, employeeRows, attendanceRows: [attendance] };
   } });
   const report = orchestrator.validateRequest({ payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['ALL'] });
   assert.equal(report.valid, true);
@@ -253,6 +256,32 @@ test('roster collisions are detected before attendance access preflight can fail
   assert.deepEqual(plain(report.errors.filter(error => error.code === 'CROSS_DEPARTMENT_EMPLOYEE_ID').map(error => error.department).sort()), ['RESERVATIONS', 'SURVEY']);
   assert.deepEqual(plain(report.employees.map(employee => employee.department)), ['MANAGEMENT']);
   assert.equal(attendanceReads.includes('SURVEY'), false);
+});
+
+test('local duplicate roster IDs also quarantine every department sharing that ID', () => {
+  const base = fixture();
+  const reservations = { ...base.config, department: 'RESERVATIONS' };
+  const management = { ...base.config, department: 'MANAGEMENT' };
+  const { orchestrator } = fixture({ configs: [base.config, reservations, management], readDepartment(config, period, employeeRow, attendanceRow) {
+    const employeeId = config.department === 'MANAGEMENT' ? 'EMP-003' : 'EMP-X';
+    const name = config.department === 'SURVEY' ? 'Survey Alex' : config.department === 'RESERVATIONS' ? 'Reservation Alex' : 'Morgan Manager';
+    const row = { ...employeeRow, values: [employeeId, name, '2026-08-01', 10], displayValues: [employeeId, name, '2026-08-01', '10'] };
+    const employeeRows = config.department === 'SURVEY' ? [row, { ...row, values: ['EMP-X', 'Second Survey Alex', '2026-08-02', 10], displayValues: ['EMP-X', 'Second Survey Alex', '2026-08-02', '10'] }] : [row];
+    const attendance = { ...attendanceRow, values: [employeeId, '2026-09-01', 'PRESENT'], displayValues: [employeeId, '2026-09-01', 'PRESENT'] };
+    return { department: config.department, period, employeeRows, attendanceRows: [attendance] };
+  } });
+  const request = { payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['ALL'] };
+  const report = orchestrator.validateRequest(request);
+
+  assert.equal(report.valid, true);
+  assert.equal(report.failedDepartments.includes('SURVEY'), true);
+  assert.equal(report.failedDepartments.includes('RESERVATIONS'), true);
+  assert.equal(report.errors.some(error => error.code === 'DUPLICATE_EMPLOYEE_ID' && error.department === 'SURVEY'), true);
+  assert.deepEqual(plain(report.errors.filter(error => error.code === 'CROSS_DEPARTMENT_EMPLOYEE_ID').map(error => error.department).sort()), ['RESERVATIONS', 'SURVEY']);
+  assert.deepEqual(plain(report.employees.map(employee => employee.department)), ['MANAGEMENT']);
+  const draft = orchestrator.calculateDraft({ ...request, acknowledgements: { partialDepartmentsFingerprint: report.partialDepartmentsFingerprint } });
+  assert.equal(draft.valid, true, JSON.stringify(plain(draft)));
+  assert.deepEqual(plain(draft.results.map(result => result.department)), ['MANAGEMENT']);
 });
 
 test('a valid draft is calculated and persisted with its source snapshot and server actor', () => {

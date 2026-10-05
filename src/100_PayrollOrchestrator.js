@@ -92,17 +92,18 @@ SalaryCalculator.PayrollOrchestrator = (function () {
               source: { spreadsheetId: config.spreadsheetId, leaveSpreadsheetId: config.leaveSpreadsheetId,
                 employeeTab: config.employeeTab, attendanceTab: config.attendanceTab } };
             var deptEmployees = employeeRows.map(function (row) { return SalaryCalculator.MappingConfig.normalizeEmployee(row, config); });
-            var ids = Object.create(null);
+            var ids = Object.create(null), localDuplicateIssues = [];
             deptEmployees.forEach(function (employee) {
-              if (ids[employee.employeeId]) throw Object.assign(new Error('Employee ID occurs more than once'), { issues: [issue('DUPLICATE_EMPLOYEE_ID', 'Employee ID occurs more than once.', department, { employeeId: employee.employeeId })] });
-              ids[employee.employeeId] = true;
+              if (ids[employee.employeeId]) localDuplicateIssues.push(issue('DUPLICATE_EMPLOYEE_ID', 'Employee ID occurs more than once.', department, { employeeId: employee.employeeId }));
+              else ids[employee.employeeId] = true;
             });
             // Preserve the normalized roster before attendance validation so a later attendance
-            // failure cannot hide IDs that collide with another department's roster.
+            // failure or local duplicate cannot hide IDs that collide with another department's roster.
             deptEmployees.forEach(function (employee) {
               employees.push({ employeeId: employee.employeeId, americanName: employee.americanName, department: department });
               inputs.push(employee);
             });
+            if (localDuplicateIssues.length) throw Object.assign(new Error('Employee ID occurs more than once'), { issues: localDuplicateIssues });
             var attendanceRows = bundle ? bundle.attendanceRows : null;
             if (splitSourceReads) {
               access = sourceGateway.validateAccess(config, 'attendance');
