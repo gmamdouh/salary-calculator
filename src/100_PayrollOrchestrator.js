@@ -25,7 +25,7 @@ SalaryCalculator.PayrollOrchestrator = (function () {
     }
     function validateRequest(request) {
       request = request || {};
-      var errors = [], warnings = [], configs, period;
+      var errors = [], warnings = [], configs, period, failed = Object.create(null);
       if (!/^\d{4}-\d{2}$/.test(request.payrollMonth || '')) errors.push(issue('INVALID_PAYROLL_MONTH', 'Payroll month must use YYYY-MM.'));
       if (!Object.prototype.hasOwnProperty.call(SalaryCalculator.Constants.CUTOFF_MODES, request.cutoffMode)) errors.push(issue('INVALID_CUTOFF', 'Cutoff mode is invalid.'));
       if (!Array.isArray(request.departmentScope) || !request.departmentScope.length) errors.push(issue('INVALID_DEPARTMENT_SCOPE', 'Choose a department or All.'));
@@ -41,11 +41,15 @@ SalaryCalculator.PayrollOrchestrator = (function () {
         var unique = [];
         scope.forEach(function (department) { if (unique.indexOf(department) === -1) unique.push(department); });
         var unknown = unique.filter(function (department) { return !configs.some(function (config) { return config.department === department; }); });
-        unknown.forEach(function (department) { errors.push(issue('UNCONFIGURED_DEPARTMENT', 'No source mapping is configured.', department)); });
+        unknown.forEach(function (department) {
+          failed[department] = true;
+          errors.push(issue('UNCONFIGURED_DEPARTMENT', 'No source mapping is configured.', department));
+        });
         if (dependencies.buildPeriod) period = dependencies.buildPeriod(request);
         else period = SalaryCalculator.PayrollPeriod.buildPeriod({ payrollMonth: request.payrollMonth, cutoffMode: request.cutoffMode,
           today: (request.today || now()).slice(0, 10) });
-        var employees = [], inputs = [], sourceSnapshot = {}, sourceConfigs = [], attendanceByEmployee = Object.create(null), failed = Object.create(null);
+        var employees = [], inputs = [], sourceSnapshot = {}, sourceConfigs = [],
+          attendanceByDepartment = Object.create(null), attendanceByEmployee = Object.create(null);
         unique.forEach(function (department) {
           var config = configs.find(function (candidate) { return candidate.department === department; });
           if (!config) return;
@@ -73,8 +77,8 @@ SalaryCalculator.PayrollOrchestrator = (function () {
             deptEmployees.forEach(function (employee) {
               employees.push({ employeeId: employee.employeeId, americanName: employee.americanName, department: department });
               inputs.push(employee);
-              attendanceByEmployee[employee.employeeId] = attendance.filter(function (record) { return record.employeeId === employee.employeeId; });
             });
+            attendanceByDepartment[department] = attendance;
           } catch (error) {
             failed[department] = true;
             (error.issues || [issue('SOURCE_ERROR', error.message || 'Unable to read department source.', department)]).forEach(function (item) {
@@ -82,6 +86,29 @@ SalaryCalculator.PayrollOrchestrator = (function () {
             });
           }
         });
+        var departmentsByEmployeeId = Object.create(null);
+        inputs.forEach(function (employee) {
+          var departments = departmentsByEmployeeId[employee.employeeId] || (departmentsByEmployeeId[employee.employeeId] = []);
+          if (departments.indexOf(employee.department) === -1) departments.push(employee.department);
+        });
+        Object.keys(departmentsByEmployeeId).forEach(function (employeeId) {
+          var departments = departmentsByEmployeeId[employeeId];
+          if (departments.length < 2) return;
+          departments.forEach(function (department) {
+            failed[department] = true;
+            errors.push(issue('CROSS_DEPARTMENT_EMPLOYEE_ID', 'Employee ID occurs in more than one department source.', department,
+              { employeeId: employeeId, departments: departments.slice() }));
+          });
+        });
+        inputs = inputs.filter(function (employee) { return !failed[employee.department]; });
+        employees = employees.filter(function (employee) { return !failed[employee.department]; });
+        sourceConfigs = sourceConfigs.filter(function (config) { return !failed[config.department]; });
+        inputs.forEach(function (employee) {
+          attendanceByEmployee[employee.employeeId] = (attendanceByDepartment[employee.department] || []).filter(function (record) {
+            return record.employeeId === employee.employeeId;
+          });
+        });
+
         var decisionRequirements = [], benefitLedger = dependencies.getBenefitLedger ? dependencies.getBenefitLedger() : [];
         inputs.forEach(function (employee) {
           var employeeDecisions = request.decisions && request.decisions.employeeDecisions &&
@@ -94,10 +121,11 @@ SalaryCalculator.PayrollOrchestrator = (function () {
             americanName: employee.americanName, department: employee.department, decision: 'PROBATION',
             candidateDate: probation.candidateDate, message: probation.note });
         });
-        return { valid: errors.length === 0, errors: errors, warnings: warnings, payrollMonth: request.payrollMonth,
+        var allMode = request.departmentScope.indexOf('ALL') !== -1;
+        return { valid: errors.length === 0 || (allMode && inputs.length > 0), errors: errors, warnings: warnings, payrollMonth: request.payrollMonth,
           cutoffMode: request.cutoffMode, departmentScope: unique, period: period, employees: employees, inputs: inputs,
           attendanceByEmployee: attendanceByEmployee, sourceSnapshot: sourceSnapshot, sourceConfigs: sourceConfigs,
-          failedDepartments: Object.keys(failed), runId: runId(), decisions: copy(request.decisions || {}),
+          failedDepartments: unique.filter(function (department) { return failed[department]; }), runId: runId(), decisions: copy(request.decisions || {}),
           decisionRequirements: decisionRequirements, unresolvedDecisionCount: decisionRequirements.length };
       } catch (error) {
         errors.push(issue('VALIDATION_ERROR', error.message || 'Payroll validation failed.'));
@@ -106,7 +134,7 @@ SalaryCalculator.PayrollOrchestrator = (function () {
     }
     function calculateDraft(request) {
       var report = validateRequest(request);
-      if (!report.valid) return { valid: false, state: 'BLOCKED', runId: report.runId || null, errors: report.errors, warnings: report.warnings || [] };
+      if (!report.valid || !report.inputs.length) return { valid: false, state: 'BLOCKED', runId: report.runId || null, errors: report.errors, warnings: report.warnings || [] };
       var decisions = copy(request.decisions || report.decisions || {});
       if (report.decisionRequirements && report.decisionRequirements.length) {
         return { valid: false, state: 'BLOCKED', runId: request.runId || report.runId,
@@ -178,9 +206,11 @@ SalaryCalculator.PayrollOrchestrator = (function () {
         cutoffMode: report.cutoffMode, departmentScope: report.departmentScope, rulesVersion: dependencies.rulesVersion || 'unknown',
         createdBy: actor(), createdAt: timestamp, sourceSnapshot: report.sourceSnapshot, sourceConfigs: report.sourceConfigs,
         inputs: report.inputs, decisions: decisions, ocrAuditEvidence: auditEvidence, results: results,
+        failedDepartments: report.failedDepartments || [], departmentErrors: report.errors || [],
         warnings: report.warnings, acknowledgements: request.acknowledgements || [] };
       try {
-        return Object.assign({ valid: true, errors: [], blockingErrors: [] }, repository.createDraft(run));
+        return Object.assign({ valid: true, errors: [], blockingErrors: [], failedDepartments: run.failedDepartments,
+          departmentErrors: run.departmentErrors }, repository.createDraft(run));
       } catch (error) {
         return { valid: false, state: 'BLOCKED', runId: id,
           errors: error.issues || [issue('DRAFT_SAVE_FAILED', error.message || 'The draft could not be saved.')], warnings: [] };

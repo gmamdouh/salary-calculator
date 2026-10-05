@@ -140,6 +140,7 @@ SalaryCalculator.RunRepository = (function () {
         // Comparing the persisted latest row makes an interrupted write safe to repeat.
         gateway.upsert(TABLES.runs, run.runId, run);
       });
+      if (typeof gateway.renderLatestResults === 'function') gateway.renderLatestResults();
       run.approvalCheckpoint.latestStatus = 'COMPLETE';
       gateway.upsert(TABLES.runs, run.runId, run);
     }
@@ -220,6 +221,21 @@ SalaryCalculator.RunRepository = (function () {
       text(key, 'Benefit key');
       return gateway.list(TABLES.benefits).some(function (row) { return row.benefitKey === key; });
     }
+    function listLatestResults() {
+      var employeeIds = Object.create(null), runs = gateway.list(TABLES.runs) || [];
+      runs.forEach(function (run) {
+        (run && run.results || []).forEach(function (result) {
+          if (result && result.employeeId) employeeIds[result.employeeId] = true;
+        });
+      });
+      return Object.keys(employeeIds).sort().map(function (employeeId) {
+        var latest = gateway.read(TABLES.latest, employeeId);
+        if (!latest) return null;
+        var run = latest.runId ? gateway.read(TABLES.runs, latest.runId) : null;
+        return Object.assign({}, latest, { cutoff: run && run.cutoff || latest.cutoff || '',
+          result: copy(latest.result) });
+      }).filter(Boolean);
+    }
     function createDraft(input) {
       var run = copy(SalaryCalculator.Contracts.assertRun(input));
       if (gateway.read(TABLES.runs, run.runId)) throw new Error('Run ID already exists');
@@ -251,7 +267,7 @@ SalaryCalculator.RunRepository = (function () {
     }
     return { createDraft: createDraft, getRun: getRun, applyOverride: applyOverride,
       approve: approve, supersede: supersede, hasBenefit: hasBenefit,
-      makeBenefitKey: benefitKey };
+      makeBenefitKey: benefitKey, listLatestResults: listLatestResults };
   }
   return { create: create };
 })();

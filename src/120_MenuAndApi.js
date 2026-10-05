@@ -108,6 +108,7 @@ SalaryCalculator.MenuAndApi = (function () {
         if (!result || result.valid === false) return result || { valid: false, errors: [issue('DRAFT_FAILED', 'The draft could not be calculated.')] };
         return { valid: true, runId: result.runId, state: result.state, payrollMonth: result.payrollMonth,
           cutoff: result.cutoff, results: result.results, errors: result.errors || [], blockingErrors: result.blockingErrors || [],
+          failedDepartments: result.failedDepartments || [], departmentErrors: result.departmentErrors || [],
           warnings: result.warnings || [] };
       });
     }
@@ -128,7 +129,8 @@ SalaryCalculator.MenuAndApi = (function () {
           }
           return { valid: result.valid, runId: result.runId, payrollMonth: result.payrollMonth,
             cutoff: result.period && result.period.endDate, employees: result.employees || [],
-            errors: result.errors || [], warnings: result.warnings || [],
+            errors: result.valid ? [] : result.errors || [], departmentErrors: result.valid ? result.errors || [] : [],
+            failedDepartments: result.failedDepartments || [], warnings: result.warnings || [],
             unresolvedDecisionCount: result.unresolvedDecisionCount || 0,
             decisionRequirements: result.decisionRequirements || [] };
         });
@@ -220,6 +222,7 @@ SalaryCalculator.MenuAndApi = (function () {
       for (var index = values.length - 1; index >= 1; index--) if (values[index][0] === key) return index + 1;
       return 0;
     }
+    var repository;
     var storage = {
       read: function (table, key) {
         if (table === 'Payroll Runs') return savedRun(key);
@@ -247,11 +250,15 @@ SalaryCalculator.MenuAndApi = (function () {
           var ledger = sheet('Payment Ledger'), rowIndex = findByFirstColumn('Payment Ledger', key) || ledger.getLastRow() + 1;
           master.writeRows(ledger, rowIndex, 1, [[value.benefitKey, value.type, value.employeeId, value.relatedEmployeeId || '',
             value.amount, value.payrollMonth, value.runId, value.paid === true, value.paymentDate || '', value.decision || '', value.eligibility || '', value.notes || '']]);
-        } else if (table === 'Latest Results') {
-          sheet('Latest Results');
-          var run = savedRun(value.runId);
-          if (run) SalaryCalculator.WorkbookSetup.renderLatestResults(sheets, run);
-        }
+        } else if (table === 'Latest Results') sheet('Latest Results');
+      },
+      renderLatestResults: function () {
+        sheet('Latest Results');
+        var latestResults = repository.listLatestResults().map(function (record) {
+          return Object.assign({}, record.result, { payrollMonth: record.payrollMonth,
+            cutoff: record.cutoff || record.result.cutoff || '' });
+        });
+        SalaryCalculator.WorkbookSetup.renderLatestResults(sheets, { results: latestResults });
       },
       appendUnique: function (table, key, value) {
         if (table === 'Payroll History') {
@@ -273,7 +280,7 @@ SalaryCalculator.MenuAndApi = (function () {
       var blob = Utilities.newBlob(JSON.stringify(record), 'application/json', 'payroll-ocr-decisions-' + record.runId + '.json');
       return [SalaryCalculator.OcrService.storeEvidence(blob, record.runId, record.actor)];
     } };
-    var repository = SalaryCalculator.RunRepository.create({ gateway: storage, sourceGateway: sourceGateway,
+    repository = SalaryCalculator.RunRepository.create({ gateway: storage, sourceGateway: sourceGateway,
       lockService: LockService, now: function () { return new Date().toISOString(); } });
     function getEmployees() {
       var period = SalaryCalculator.PayrollPeriod.buildPeriod({ payrollMonth: Utilities.formatDate(new Date(), book.getSpreadsheetTimeZone(), 'yyyy-MM'),

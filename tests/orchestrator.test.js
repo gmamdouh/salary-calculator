@@ -20,7 +20,7 @@ function fixture(options = {}) {
   const calls = [];
   const configs = options.configs || [config];
   const sourceGateway = {
-    validateAccess() { return { valid: true, errors: [], warnings: [] }; },
+    validateAccess(c) { return options.validateAccess ? options.validateAccess(c) : { valid: true, errors: [], warnings: [] }; },
     readDepartment(c, p) {
       calls.push(['read', c.department]);
       if (options.readDepartment) return options.readDepartment(c, p, rawEmployee, rawAttendance);
@@ -36,7 +36,13 @@ function fixture(options = {}) {
   };
   return { PayrollOrchestrator, config, period, sourceGateway, repository, calls,
     orchestrator: PayrollOrchestrator && PayrollOrchestrator.create({
-      sourceGateway, repository, getConfigs: () => configs, getRules: () => ({ salaries: { SURVEY: { before: { basic: 12000, abs: 2000 }, after: { basic: 15000, abs: 3000 } } } }),
+      sourceGateway, repository, getConfigs: () => configs, getRules: options.getRules || (() => ({ salaries: {
+        SURVEY: { before: { basic: 12000, abs: 2000 }, after: { basic: 15000, abs: 3000 } },
+        RESERVATIONS: { before: { basic: 12000, abs: 2000 }, after: { basic: 15000, abs: 3000 } },
+        SALES: { before: { basic: 16000, abs: 4000 }, after: { basic: 16000, abs: 4000 } },
+        TDS: { before: { basic: 18000, abs: 0 }, after: { basic: 21000, abs: 0 } },
+        MANAGEMENT: { before: { basic: 21000, abs: 0 }, after: { basic: 27000, abs: 0 } }
+      } })),
       rulesVersion: 'rules-v1', clock: () => '2026-10-04T10:00:00.000Z', actor: () => 'hr@example.test',
       buildPeriod: () => period, readDecisions: () => ({}), auditStore: options.auditStore,
       getHolidayCalendar: () => options.holidays || []
@@ -60,10 +66,65 @@ test('All departments keeps valid departments available when duplicate IDs block
     return { department: config.department, period, employeeRows, attendanceRows: [attendanceRow] };
   } });
   const report = orchestrator.validateRequest({ payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['ALL'] });
-  assert.equal(report.valid, false);
+  assert.equal(report.valid, true);
   assert.equal(report.errors.some(error => error.code === 'DUPLICATE_EMPLOYEE_ID' && error.department === 'SURVEY'), true);
   assert.deepEqual(plain(report.employees.map(employee => employee.department)), ['RESERVATIONS']);
   assert.equal(report.sourceSnapshot.SURVEY.employeeRows.length, 2);
+});
+
+test('All mode drafts healthy departments and returns failed department errors', () => {
+  const base = fixture();
+  const reservations = { ...base.config, department: 'RESERVATIONS' };
+  const { orchestrator, calls } = fixture({ configs: [base.config, reservations], readDepartment(config, period, employeeRow, attendanceRow) {
+    if (config.department === 'RESERVATIONS') throw new Error('Reservations workbook unavailable');
+    return { department: config.department, period, employeeRows: [employeeRow], attendanceRows: [attendanceRow] };
+  } });
+  const request = { payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['ALL'] };
+  const validation = orchestrator.validateRequest(request);
+  assert.equal(validation.valid, true);
+  assert.equal(validation.failedDepartments.includes('RESERVATIONS'), true);
+  assert.equal(validation.errors.some(error => error.department === 'RESERVATIONS'), true);
+  const draft = orchestrator.calculateDraft(request);
+  assert.equal(draft.valid, true, JSON.stringify(plain(draft)));
+  assert.equal(draft.failedDepartments.includes('RESERVATIONS'), true);
+  assert.equal(draft.departmentErrors.some(error => error.department === 'RESERVATIONS'), true);
+  assert.deepEqual(plain(draft.results.map(result => result.department)), ['SURVEY']);
+  assert.equal(calls.some(call => call[0] === 'draft'), true);
+});
+
+test('a single invalid department still blocks draft creation', () => {
+  const { orchestrator, calls } = fixture({ readDepartment() { throw new Error('Survey workbook unavailable'); } });
+  const result = orchestrator.calculateDraft({ payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['SURVEY'] });
+  assert.equal(result.valid, false);
+  assert.equal(result.state, 'BLOCKED');
+  assert.equal(result.errors[0].department, 'SURVEY');
+  assert.equal(calls.some(call => call[0] === 'draft'), false);
+});
+
+test('cross-department Employee ID collisions exclude every affected department without replacing attendance', () => {
+  const base = fixture();
+  const reservations = { ...base.config, department: 'RESERVATIONS' };
+  const management = { ...base.config, department: 'MANAGEMENT' };
+  const { orchestrator } = fixture({ configs: [base.config, reservations, management], readDepartment(config, period, employeeRow, attendanceRow) {
+    const employeeId = config.department === 'MANAGEMENT' ? 'EMP-003' : 'EMP-001';
+    const name = config.department === 'SURVEY' ? 'Survey Alex' : config.department === 'RESERVATIONS' ? 'Reservation Alex' : 'Morgan Manager';
+    const status = config.department === 'RESERVATIONS' ? 'NS' : 'PRESENT';
+    const employee = { ...employeeRow, values: [employeeId, name, '2026-08-01', 10], displayValues: [employeeId, name, '2026-08-01', '10'] };
+    const attendance = { ...attendanceRow, values: [employeeId, '2026-09-01', status], displayValues: [employeeId, '2026-09-01', status] };
+    return { department: config.department, period, employeeRows: [employee], attendanceRows: [attendance] };
+  } });
+  const request = { payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['ALL'] };
+  const validation = orchestrator.validateRequest(request);
+  assert.equal(validation.valid, true);
+  assert.equal(validation.failedDepartments.includes('SURVEY'), true);
+  assert.equal(validation.failedDepartments.includes('RESERVATIONS'), true);
+  assert.equal(validation.errors.filter(error => error.code === 'CROSS_DEPARTMENT_EMPLOYEE_ID').length, 2);
+  assert.deepEqual(plain(validation.employees.map(employee => employee.department)), ['MANAGEMENT']);
+  assert.equal(validation.attendanceByEmployee['EMP-001'], undefined);
+  assert.equal(validation.attendanceByEmployee['EMP-003'][0].status, 'PRESENT');
+  const draft = orchestrator.calculateDraft(request);
+  assert.equal(draft.valid, true, JSON.stringify(plain(draft)));
+  assert.deepEqual(plain(draft.results.map(result => result.employeeId)), ['EMP-003']);
 });
 
 test('a valid draft is calculated and persisted with its source snapshot and server actor', () => {
@@ -190,6 +251,30 @@ test('sidebar API omits internal employee names and raw source snapshots', () =>
   assert.equal(validation.employees[0].americanName, 'Alex Smith');
 });
 
+test('sidebar API exposes partial department failures separately from blocking errors', () => {
+  const { MenuAndApi } = loadAppsScript();
+  const departmentErrors = [{ code: 'SOURCE_ERROR', department: 'RESERVATIONS', message: 'Unavailable' }];
+  const orchestrator = {
+    validateRequest: () => ({ valid: true, runId: 'RUN-ALL', payrollMonth: '2026-09', period: { endDate: '2026-09-30' },
+      employees: [{ employeeId: 'EMP-SUR', americanName: 'Alex Smith', department: 'SURVEY' }],
+      failedDepartments: ['RESERVATIONS'], errors: departmentErrors, warnings: [] }),
+    calculateDraft: () => ({ valid: true, runId: 'RUN-ALL', state: 'DRAFT', payrollMonth: '2026-09',
+      results: [{ employeeId: 'EMP-SUR', department: 'SURVEY' }], failedDepartments: ['RESERVATIONS'],
+      departmentErrors, errors: [], blockingErrors: [], warnings: [] })
+  };
+  const api = MenuAndApi.create({ orchestrator });
+  const validation = api.validateRun({ payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['ALL'] });
+  const draft = api.calculateDraft({ payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['ALL'] });
+  assert.equal(validation.valid, true);
+  assert.deepEqual(plain(validation.errors), []);
+  assert.deepEqual(plain(validation.failedDepartments), ['RESERVATIONS']);
+  assert.deepEqual(plain(validation.departmentErrors), departmentErrors);
+  assert.equal(draft.valid, true);
+  assert.deepEqual(plain(draft.failedDepartments), ['RESERVATIONS']);
+  assert.deepEqual(plain(draft.departmentErrors), departmentErrors);
+  assert.deepEqual(plain(draft.errors), []);
+});
+
 test('Apps Script globals are available and the custom menu targets the required actions', () => {
   const menuItems = [], added = [];
   const context = vm.createContext({ SpreadsheetApp: { getUi() { return { createMenu(name) {
@@ -254,4 +339,42 @@ test('failed write-back resumes one approval checkpoint without duplicating hist
   const secondApproval = orchestrator.approveRun(run.runId, 'third@example.test');
   assert.deepEqual(plain(secondApproval), plain(retry));
   assert.equal(events.filter(event => event[0] === 'source').length, sourceCalls);
+});
+
+test('effective latest results include employees outside a scoped approval', () => {
+  const { RunRepository } = loadAppsScript();
+  const tables = new Map();
+  const table = name => { if (!tables.has(name)) tables.set(name, new Map()); return tables.get(name); };
+  const gateway = {
+    read(name, key) { return table(name).has(key) ? plain(table(name).get(key)) : null; },
+    upsert(name, key, value) { table(name).set(key, plain(value)); },
+    appendUnique(name, key, value) { if (!table(name).has(key)) table(name).set(key, plain(value)); },
+    list(name) { return Array.from(table(name).values()).map(plain); }
+  };
+  const lockService = { getDocumentLock() { return { waitLock() {}, releaseLock() {} }; } };
+  let repository, failRender = true, rendered = [];
+  const reservationResult = { employeeId: 'EMP-RES', americanName: 'Jamie Doe', department: 'RESERVATIONS',
+    payrollMonth: '2026-09', total: 100, components: {} };
+  gateway.upsert('Payroll Runs', 'RUN-RES', { runId: 'RUN-RES', version: 1, state: 'APPROVED', payrollMonth: '2026-09',
+    cutoff: '2026-09-30', approvedAt: '2026-10-01T00:00:00.000Z', results: [reservationResult] });
+  gateway.upsert('Latest Results', 'EMP-RES', { runId: 'RUN-RES', version: 1, payrollMonth: '2026-09',
+    cutoff: '2026-09-30', result: reservationResult });
+  gateway.renderLatestResults = () => {
+    if (failRender) { failRender = false; throw new Error('Simulated interruption during latest-results render'); }
+    rendered = repository.listLatestResults().map(record => record.result.employeeId).sort();
+  };
+  repository = RunRepository.create({ gateway, lockService, now: () => '2026-10-02T00:00:00.000Z' });
+  const surveyResult = { employeeId: 'EMP-SUR', americanName: 'Alex Smith', department: 'SURVEY',
+    payrollMonth: '2026-09', total: 200, components: {} };
+  repository.createDraft({ runId: 'RUN-SUR', version: 1, rulesVersion: 'v1', createdBy: 'hr@example.test',
+    payrollMonth: '2026-09', cutoff: '2026-09-30', sourceSnapshot: {}, results: [surveyResult], inputs: [], decisions: {}, sourceConfigs: [] });
+  assert.throws(() => repository.approve('RUN-SUR', 'approver@example.test'), /Simulated interruption/);
+  assert.equal(repository.getRun('RUN-SUR').approvalCheckpoint.latestStatus, 'PENDING');
+  repository.approve('RUN-SUR', 'approver@example.test');
+
+  const latest = repository.listLatestResults();
+  assert.deepEqual(plain(latest.map(record => record.result.employeeId).sort()), ['EMP-RES', 'EMP-SUR']);
+  assert.equal(latest.find(record => record.result.employeeId === 'EMP-RES').runId, 'RUN-RES');
+  assert.equal(latest.find(record => record.result.employeeId === 'EMP-SUR').runId, 'RUN-SUR');
+  assert.deepEqual(plain(rendered), ['EMP-RES', 'EMP-SUR']);
 });
