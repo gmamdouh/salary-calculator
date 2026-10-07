@@ -45,6 +45,51 @@ test('draft preserves rules, inputs and results independently of caller mutation
   assert.equal(stored.results[0].components.basic.amount, 15000);
   assert.equal(events.some(event => event[0] === 'source'), false);
 });
+
+test('identical draft retry resumes a transient audit projection failure without duplicate history', () => {
+  const { repository, gateway } = harness();
+  const input = runRecord(), projected = new Map();
+  let failOnce = true;
+  gateway.projectRunAudit = run => {
+    if (failOnce) { failOnce = false; throw new Error('Audit tab unavailable'); }
+    projected.set(run.runId, plain(run));
+  };
+  assert.throws(() => repository.createDraft(input), error => error.issues?.[0]?.code === 'DRAFT_PERSISTENCE_INCOMPLETE' && error.issues[0].resumable === true);
+  assert.equal(gateway.read('Payroll Runs', input.runId).state, 'DRAFT');
+  assert.equal(gateway.read('Payroll Runs', input.runId).draftCheckpoint.state, 'PENDING');
+  assert.equal(gateway.list('Payroll History').length, 0);
+  assert.throws(() => repository.applyOverride(input.runId, 'EMP-001', 'basic', 16000, 'Correction', 'editor'),
+    error => error.issues?.[0]?.code === 'DRAFT_PERSISTENCE_INCOMPLETE');
+  assert.throws(() => repository.approve(input.runId, 'approver'),
+    error => error.issues?.[0]?.code === 'DRAFT_PERSISTENCE_INCOMPLETE');
+  assert.throws(() => repository.createDraft(runRecord({ payrollMonth: '2026-08' })), error => error.issues?.[0]?.code === 'RUN_ID_CONFLICT');
+  const resumed = repository.createDraft(input);
+  assert.equal(resumed.runId, input.runId);
+  assert.equal(resumed.state, 'DRAFT');
+  assert.equal(resumed.draftCheckpoint.state, 'COMPLETE');
+  assert.equal(gateway.list('Payroll History').length, 1);
+  assert.equal(projected.size, 1);
+  repository.createDraft(input);
+  assert.equal(gateway.list('Payroll History').length, 1);
+  assert.equal(projected.size, 1);
+});
+
+test('draft retry repairs transient history failure but rejects a conflicting payload', () => {
+  const { repository, gateway } = harness();
+  const input = runRecord(), append = gateway.appendUnique;
+  let failOnce = true;
+  gateway.appendUnique = function (...args) {
+    if (failOnce && args[0] === 'Payroll History') { failOnce = false; throw new Error('History tab unavailable'); }
+    return append.apply(this, args);
+  };
+  assert.throws(() => repository.createDraft(input), error => error.issues?.[0]?.code === 'DRAFT_PERSISTENCE_INCOMPLETE');
+  assert.equal(gateway.list('Payroll History').length, 0);
+  repository.createDraft(input);
+  assert.equal(gateway.list('Payroll History').length, 1);
+  const conflict = runRecord({ results: [{ ...input.results[0], total: 99999 }] });
+  assert.throws(() => repository.createDraft(conflict), error => error.issues?.[0]?.code === 'RUN_ID_CONFLICT');
+  assert.equal(gateway.list('Payroll History').length, 1);
+});
 test('overrides require a reason and persist calculated, previous and edited amounts with audit identity', () => {
   const { repository } = harness();
   repository.createDraft(runRecord());

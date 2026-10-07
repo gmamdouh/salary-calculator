@@ -152,6 +152,7 @@ SalaryCalculator.RunRepository = (function () {
       text(approver, 'Approver');
       return locked(function () {
         var run = getRun(runId);
+        assertDraftComplete(run);
         if (run.state === 'SUPERSEDED') return approvalResult(run);
         if (run.state === 'APPROVED' && run.writeBackStatus === 'COMPLETE') {
           if (run.approvalCheckpoint && run.approvalCheckpoint.latestStatus === 'PENDING') publishLatest(run);
@@ -240,18 +241,63 @@ SalaryCalculator.RunRepository = (function () {
           result: copy(latest.result) });
       }).filter(Boolean);
     }
+    function comparableDraft(run) {
+      var value = copy(run);
+      ['state', 'createdAt', 'revision', 'overrides', 'draftCheckpoint'].forEach(function (field) { delete value[field]; });
+      function stable(item) {
+        if (Array.isArray(item)) return item.map(stable);
+        if (!item || typeof item !== 'object') return item;
+        var sorted = {};
+        Object.keys(item).sort().forEach(function (key) { sorted[key] = stable(item[key]); });
+        return sorted;
+      }
+      return JSON.stringify(stable(value));
+    }
+    function draftPersistenceError(runId, error) {
+      var failure = new Error('Draft persistence is incomplete; retry the same run ID');
+      failure.issues = [{ code: 'DRAFT_PERSISTENCE_INCOMPLETE', message: failure.message, runId: runId,
+        resumable: true, cause: error.message || String(error) }];
+      return failure;
+    }
+    function assertDraftComplete(run) {
+      if (run.draftCheckpoint && run.draftCheckpoint.state !== 'COMPLETE') {
+        throw draftPersistenceError(run.runId, new Error('Draft projection has not completed'));
+      }
+    }
     function createDraft(input) {
-      var run = copy(SalaryCalculator.Contracts.assertRun(input));
-      if (gateway.read(TABLES.runs, run.runId)) throw new Error('Run ID already exists');
-      run.state = 'DRAFT'; run.revision = 1; run.createdAt = now(); run.overrides = [];
-      gateway.upsert(TABLES.runs, run.runId, run);
-      gateway.appendUnique(TABLES.history, run.runId + ':DRAFT:1', run);
-      return copy(run);
+      var incoming = copy(SalaryCalculator.Contracts.assertRun(input));
+      return locked(function () {
+        var run = gateway.read(TABLES.runs, incoming.runId);
+        if (run) {
+          if (run.state !== 'DRAFT' || run.revision !== 1 || (run.overrides || []).length || run.approvalCheckpoint ||
+              comparableDraft(run) !== comparableDraft(incoming)) {
+            var conflict = new Error('Run ID already exists with a different or edited draft');
+            conflict.issues = [{ code: 'RUN_ID_CONFLICT', message: conflict.message, runId: incoming.runId }];
+            throw conflict;
+          }
+        } else {
+          run = incoming;
+          run.state = 'DRAFT'; run.revision = 1; run.createdAt = now(); run.overrides = [];
+          run.draftCheckpoint = { state: 'PENDING' };
+        }
+        try {
+          // Replaying both projections is safe after any interrupted write.
+          gateway.upsert(TABLES.runs, run.runId, run);
+          gateway.appendUnique(TABLES.history, run.runId + ':DRAFT:1', run);
+          run.draftCheckpoint = { state: 'COMPLETE' };
+          gateway.upsert(TABLES.runs, run.runId, run);
+          return copy(run);
+        } catch (error) {
+          if (gateway.read(TABLES.runs, run.runId)) throw draftPersistenceError(run.runId, error);
+          throw error;
+        }
+      });
     }
     function applyOverride(runId, employeeId, component, value, reason, editor) {
       text(reason, 'Override reason'); text(editor, 'Override editor');
       return locked(function () {
         var run = getRun(runId);
+        assertDraftComplete(run);
         if (run.state !== 'DRAFT' || run.approvalCheckpoint) throw new Error('Run is frozen and cannot be edited');
         var result = run.results.find(function (row) { return row.employeeId === employeeId; });
         if (!result) throw new Error('Unknown employee');
