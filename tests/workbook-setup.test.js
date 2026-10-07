@@ -11,8 +11,8 @@ const expectedHeaders = {
   'Latest Results': ['American Name', 'Department', 'Payroll Month', 'Cutoff', 'Basic EGP', 'ABS EGP', 'Commission EGP', 'Extra Days EGP', 'Probation EGP', 'Referral EGP', 'Deductions EGP', 'Total EGP', 'Notes', 'Warnings'],
   'Payroll History': ['Run ID', 'Version', 'State', 'Employee ID', 'American Name', 'Department', 'Payroll Month', 'Cutoff', 'Final Settlement', 'Basic EGP', 'ABS EGP', 'Commission EGP', 'Extra Days EGP', 'Annual Balance EGP', 'Probation EGP', 'Referral EGP', 'Deductions EGP', 'Total EGP', 'Run Snapshot Ref'],
   'Payment Ledger': ['Benefit Key', 'Type', 'Employee ID', 'Related Employee ID', 'Amount EGP', 'Payroll Month', 'Run ID', 'Paid', 'Payment Date', 'Decision', 'Eligibility', 'Notes'],
-  'Override Audit': ['Run ID', 'Component', 'Employee ID', 'American Name', 'Calculated EGP', 'Previous EGP', 'Edited EGP', 'Reason', 'Editor', 'Timestamp'],
-  'Run Decisions': ['Run ID', 'Decision Type', 'Employee ID', 'American Name', 'Decision', 'Reason', 'Evidence URL', 'Acknowledged By', 'Timestamp', 'Details JSON'],
+  'Override Audit': ['Run ID', 'Component', 'Employee ID', 'American Name', 'Calculated EGP', 'Previous EGP', 'Edited EGP', 'Reason', 'Editor', 'Timestamp', 'Audit Key'],
+  'Run Decisions': ['Run ID', 'Decision Type', 'Employee ID', 'American Name', 'Decision', 'Reason', 'Evidence URL', 'Acknowledged By', 'Timestamp', 'Details JSON', 'Audit Key'],
   'Payroll Runs': ['Run ID', 'Version', 'State', 'Payroll Month', 'Cutoff', 'RunRecord JSON']
 };
 
@@ -107,6 +107,20 @@ test('initialization is idempotent and seeds the exact 2027 holiday calendar', (
   ]);
 });
 
+test('initialization repairs appended source and audit key headers on an existing workbook', () => {
+  const { WorkbookSetup } = loadAppsScript();
+  const spreadsheet = fakeSpreadsheet();
+  WorkbookSetup.initialize(spreadsheet);
+  spreadsheet.getSheetByName('Sources & Mappings').getRange(1, 13, 1, 4).clearContent();
+  spreadsheet.getSheetByName('Override Audit').getRange(1, 11).clearContent();
+  spreadsheet.getSheetByName('Run Decisions').getRange(1, 11).clearContent();
+  assert.equal(WorkbookSetup.initialize(spreadsheet).valid, true);
+  assert.deepEqual(spreadsheet.getSheetByName('Sources & Mappings').getRange(1, 13, 1, 4).getValues()[0],
+    ['Deduction Workbook ID', 'Deduction Tab', 'Deduction Header Row', 'Deduction Column Mappings']);
+  assert.equal(spreadsheet.getSheetByName('Override Audit').getRange(1, 11).getValues()[0][0], 'Audit Key');
+  assert.equal(spreadsheet.getSheetByName('Run Decisions').getRange(1, 11).getValues()[0][0], 'Audit Key');
+});
+
 test('latest results separates active employees and final settlements and never displays Employee ID', () => {
   const { WorkbookSetup } = loadAppsScript();
   const spreadsheet = fakeSpreadsheet();
@@ -148,4 +162,36 @@ test('history preserves Employee IDs in protected audit data and appends one row
   assert.equal(WorkbookSetup.appendHistory(sheetMap, run), 0);
   assert.equal(history.getLastRow(), 2);
   assert.match(spreadsheet.getSheetByName('Payroll Runs').getRange(2, 6).getValues()[0][0], /Internal Name/);
+});
+
+test('audit tabs project overrides and decisions from durable run state without duplicate retry rows', () => {
+  const { WorkbookSetup } = loadAppsScript();
+  const spreadsheet = fakeSpreadsheet(), sheets = WorkbookSetup.ensureManagedSheets(spreadsheet);
+  const run = runRecord({ createdBy: 'hr@example.test', createdAt: '2026-10-04T09:00:00Z',
+    decisions: { employeeDecisions: { 'EMP-001': { deductions: [{ amount: 125, reason: 'Equipment', source: { spreadsheetId: 'deductions', tab: 'Charges', row: 7 } }] } },
+      holidayWork: { applies: true, employeeIds: ['EMP-001'] } },
+    acknowledgements: { partialDepartmentsFingerprint: 'partial-123' },
+    ocrAuditEvidence: [{ url: 'https://drive.google.com/file/d/evidence', evidenceId: 'evidence' }],
+    overrides: [{ runId: 'RUN-001', employeeId: 'EMP-001', component: 'basic', originalValue: 15000,
+      previousValue: 15000, value: 16000, reason: 'HR correction', editor: 'hr@example.test', timestamp: '2026-10-04T09:30:00Z' }] });
+  WorkbookSetup.projectAuditTabs(sheets, run);
+  const override = spreadsheet.getSheetByName('Override Audit');
+  const decisions = spreadsheet.getSheetByName('Run Decisions');
+  assert.deepEqual(override.getRange(2, 1, 1, 10).getValues()[0],
+    ['RUN-001', 'basic', 'EMP-001', 'Alex Smith', 15000, 15000, 16000, 'HR correction', 'hr@example.test', '2026-10-04T09:30:00Z']);
+  assert.match(decisions.getRange(2, 10).getValues()[0][0], /deductions|holidayWork|partialDepartmentsFingerprint/);
+  const rowsBeforeRetry = [override.getLastRow(), decisions.getLastRow()];
+  WorkbookSetup.projectAuditTabs(sheets, run);
+  assert.deepEqual([override.getLastRow(), decisions.getLastRow()], rowsBeforeRetry);
+  run.overrides[0].reason = '=SUM(1,1)';
+  WorkbookSetup.projectAuditTabs(sheets, run);
+  assert.equal(override.getRange(2, 8).getValues()[0][0], "'=SUM(1,1)");
+  assert.equal(override.getLastRow(), rowsBeforeRetry[0]);
+  run.state = 'APPROVED'; run.approvedBy = 'approver@example.test'; run.approvedAt = '2026-10-04T10:00:00Z';
+  run.approvalCheckpoint = { approvedBy: run.approvedBy, approvedAt: run.approvedAt, state: 'APPROVING' };
+  WorkbookSetup.projectAuditTabs(sheets, run);
+  assert.match([...decisions.cells.values()].map(String).join('|'), /APPROVED|approver@example.test/);
+  const approvedRows = decisions.getLastRow();
+  WorkbookSetup.projectAuditTabs(sheets, run);
+  assert.equal(decisions.getLastRow(), approvedRows);
 });

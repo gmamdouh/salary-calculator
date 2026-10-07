@@ -232,6 +232,19 @@ test('deduction mapping rejects duplicate, invalid and unsafe month-only cutoff 
     deductionColumns: { employeeId: 'ID', amount: 'Amount' } })]).valid, false);
 });
 
+test('deduction amounts accept positive numeric cells and strict decimal text only', () => {
+  const { MappingConfig, PayrollPeriod } = loadAppsScript();
+  const config = mappingConfig({ deductionSpreadsheetId: 'survey-deductions', deductionTab: 'Charges',
+    deductionColumns: { employeeId: 'ID', amount: 'Amount', date: 'Date' } });
+  const period = PayrollPeriod.buildPeriod(periodOptions());
+  const record = value => ({ ID: 'EMP-001', Amount: value, Date: '2026-09-10', rowNumber: 8 });
+  for (const [value, expected] of [[125, 125], ['125.50', 125.5], [' 0.01 ', 0.01]])
+    assert.equal(MappingConfig.normalizeDeductions([record(value)], config, period)[0].amount, expected);
+  for (const value of [true, false, new Date('2026-09-10'), {}, [], '', '1x', '1,200', 'NaN', 'Infinity', 0, -1, NaN, Infinity])
+    assert.throws(() => MappingConfig.normalizeDeductions([record(value)], config, period),
+      error => error.issues[0].code === 'INVALID_DEDUCTION_AMOUNT' && error.issues[0].row === 8 && error.issues[0].column === 2);
+});
+
 test('gateway reads optional deduction source with displayed Employee ID and validates access', () => {
   const fake = fakeSpreadsheets(), gateway = loadAppsScript().SpreadsheetGateway.create({ spreadsheetApp: fake.app });
   const config = mappingConfig({ deductionSpreadsheetId: 'fixture-deduction', deductionTab: 'Charges',

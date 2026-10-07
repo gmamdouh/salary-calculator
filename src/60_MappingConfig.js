@@ -189,10 +189,13 @@ SalaryCalculator.MappingConfig = (function () {
     var mapped = mapping.deductionColumns, records = [], errors = [], seen = Object.create(null);
     if (mapped.payrollMonth && !period.isComplete) fail([issue(mapping, 'deduction', mapping.deductionHeaderRow || 1, 'payrollMonth', 'PARTIAL_MONTH_DEDUCTION', 'Month-only deductions cannot be used with a partial cutoff')]);
     rows.forEach(function (row) {
-      var source = cells(row, mapping, 'deduction'), values = source.values, employeeId = text(values.employeeId), amount = Number(values.amount), when;
+      var source = cells(row, mapping, 'deduction'), values = source.values, employeeId = text(values.employeeId), rawAmount = values.amount, when;
+      var numericAmount = typeof rawAmount === 'number' ||
+        (typeof rawAmount === 'string' && /^\d+(?:\.\d+)?$/.test(rawAmount.trim()));
+      var amount = numericAmount ? Number(rawAmount) : NaN;
       function add(field, code, message) { errors.push(issue(mapping, 'deduction', source.rowNumber, field, code, message, source.positions[field])); }
       if (!employeeId) add('employeeId', 'MISSING_EMPLOYEE_ID', 'Deduction Employee ID is required');
-      if (!text(values.amount) || !Number.isFinite(amount) || amount <= 0) add('amount', 'INVALID_DEDUCTION_AMOUNT', 'Deduction amount must be positive and finite');
+      if (!Number.isFinite(amount) || amount <= 0) add('amount', 'INVALID_DEDUCTION_AMOUNT', 'Deduction amount must be a positive finite decimal');
       if (mapped.date) { try { when = date(values.date, mapping.dateFormat); } catch (error) { add('date', 'INVALID_DATE', error.message); } }
       else { when = text(values.payrollMonth); if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(when)) add('payrollMonth', 'INVALID_PAYROLL_MONTH', 'Expected YYYY-MM'); }
       if (!employeeId || !Number.isFinite(amount) || amount <= 0 || !when) return;

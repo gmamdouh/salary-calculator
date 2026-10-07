@@ -8,8 +8,8 @@ SalaryCalculator.WorkbookSetup = (function () {
     'Latest Results': { title: 'Active Employees', headerRow: 2, headers: ['American Name', 'Department', 'Payroll Month', 'Cutoff', 'Basic EGP', 'ABS EGP', 'Commission EGP', 'Extra Days EGP', 'Probation EGP', 'Referral EGP', 'Deductions EGP', 'Total EGP', 'Notes', 'Warnings'] },
     'Payroll History': { headers: ['Run ID', 'Version', 'State', 'Employee ID', 'American Name', 'Department', 'Payroll Month', 'Cutoff', 'Final Settlement', 'Basic EGP', 'ABS EGP', 'Commission EGP', 'Extra Days EGP', 'Annual Balance EGP', 'Probation EGP', 'Referral EGP', 'Deductions EGP', 'Total EGP', 'Run Snapshot Ref'] },
     'Payment Ledger': { headers: ['Benefit Key', 'Type', 'Employee ID', 'Related Employee ID', 'Amount EGP', 'Payroll Month', 'Run ID', 'Paid', 'Payment Date', 'Decision', 'Eligibility', 'Notes'] },
-    'Override Audit': { headers: ['Run ID', 'Component', 'Employee ID', 'American Name', 'Calculated EGP', 'Previous EGP', 'Edited EGP', 'Reason', 'Editor', 'Timestamp'] },
-    'Run Decisions': { headers: ['Run ID', 'Decision Type', 'Employee ID', 'American Name', 'Decision', 'Reason', 'Evidence URL', 'Acknowledged By', 'Timestamp', 'Details JSON'] },
+    'Override Audit': { headers: ['Run ID', 'Component', 'Employee ID', 'American Name', 'Calculated EGP', 'Previous EGP', 'Edited EGP', 'Reason', 'Editor', 'Timestamp', 'Audit Key'] },
+    'Run Decisions': { headers: ['Run ID', 'Decision Type', 'Employee ID', 'American Name', 'Decision', 'Reason', 'Evidence URL', 'Acknowledged By', 'Timestamp', 'Details JSON', 'Audit Key'] },
     'Payroll Runs': { headers: ['Run ID', 'Version', 'State', 'Payroll Month', 'Cutoff', 'RunRecord JSON'], hidden: true, protected: true }
   };
   var SHEET_ORDER = ['Dashboard', 'Sources & Mappings', 'Salary Rules', 'Holiday Calendar', 'Latest Results', 'Payroll History', 'Payment Ledger', 'Override Audit', 'Run Decisions', 'Payroll Runs'];
@@ -44,7 +44,17 @@ SalaryCalculator.WorkbookSetup = (function () {
       if (schema.title && sheet.getLastRow() === 0) masterGateway().writeRows(sheet, 1, 1, [[schema.title]]);
       var row = schema.headerRow || 1, existing = sheet.getRange(row, 1, 1, schema.headers.length).getValues()[0];
       if (!existing.some(function (value) { return value !== '' && value !== null && value !== undefined; })) masterGateway().writeRows(sheet, row, 1, [schema.headers]);
-      else if (schema.headers.some(function (header, index) { return existing[index] !== header; })) throw new Error('Managed header mismatch in ' + name);
+      else if (schema.headers.some(function (header, index) { return existing[index] !== header; })) {
+        var oldWidth = name === 'Sources & Mappings' ? 12 : name === 'Override Audit' || name === 'Run Decisions' ? 10 : 0;
+        var matchingPrefix = oldWidth && schema.headers.slice(0, oldWidth).every(function (header, index) { return existing[index] === header; });
+        var blankSuffix = matchingPrefix && existing.slice(oldWidth).every(function (value) { return value === '' || value === null || value === undefined; });
+        var suffixHasData = blankSuffix && sheet.getLastRow() > row && sheet.getRange(row + 1, oldWidth + 1,
+          sheet.getLastRow() - row, schema.headers.length - oldWidth).getValues().some(function (values) {
+          return values.some(function (value) { return value !== '' && value !== null && value !== undefined; });
+        });
+        if (!blankSuffix || suffixHasData) throw new Error('Managed header mismatch in ' + name);
+        masterGateway().writeRows(sheet, row, oldWidth + 1, [schema.headers.slice(oldWidth)]);
+      }
       if (schema.hidden && typeof sheet.hideSheet === 'function') sheet.hideSheet();
     });
     return map;
@@ -105,6 +115,8 @@ SalaryCalculator.WorkbookSetup = (function () {
     gateway.protectRange(sheetMap['Payment Ledger'], 2, 3, Math.max(1, (typeof sheetMap['Payment Ledger'].getMaxRows === 'function' ? sheetMap['Payment Ledger'].getMaxRows() : 1000) - 1), 1, 'SalaryCalculator: Payment Ledger Employee ID');
     gateway.protectRange(sheetMap['Override Audit'], 2, 3, Math.max(1, (typeof sheetMap['Override Audit'].getMaxRows === 'function' ? sheetMap['Override Audit'].getMaxRows() : 1000) - 1), 1, 'SalaryCalculator: Override Audit Employee ID');
     gateway.protectRange(sheetMap['Run Decisions'], 2, 3, Math.max(1, (typeof sheetMap['Run Decisions'].getMaxRows === 'function' ? sheetMap['Run Decisions'].getMaxRows() : 1000) - 1), 1, 'SalaryCalculator: Run Decisions Employee ID');
+    gateway.protectSheet(sheetMap['Override Audit'], 'SalaryCalculator: protected override audit');
+    gateway.protectSheet(sheetMap['Run Decisions'], 'SalaryCalculator: protected run decisions');
     gateway.protectSheet(sheetMap['Payroll Runs'], 'SalaryCalculator: protected technical run records');
   }
   function initialize(spreadsheet) {
@@ -189,7 +201,59 @@ SalaryCalculator.WorkbookSetup = (function () {
     }
     return rows.length;
   }
+  function projectAuditTabs(sheetMap, run) {
+    var gateway = masterGateway(), results = run.results || [], evidence = (run.ocrAuditEvidence || []).map(function (item) { return item.url; }).filter(Boolean).join(', ');
+    function name(employeeId) {
+      var result = results.find(function (item) { return item.employeeId === employeeId; });
+      return result ? americanName(run, result) : '';
+    }
+    function write(name, rows) {
+      var target = sheetMap[name];
+      if (!target) throw new Error(name + ' sheet is required');
+      var last = target.getLastRow(), keys = last > 1 ? target.getRange(2, 11, last - 1, 1).getValues() : [], index = Object.create(null);
+      keys.forEach(function (row, position) { if (row[0]) index[String(row[0])] = position + 2; });
+      rows.forEach(function (row) {
+        var safeRow = row.map(function (value) {
+          return typeof value === 'string' && /^[=+\-@]/.test(value) ? "'" + value : value;
+        });
+        var key = safeRow[10], position = index[key] || target.getLastRow() + 1;
+        gateway.writeRows(target, position, 1, [safeRow]);
+        index[key] = position;
+      });
+    }
+    var overrides = (run.overrides || []).map(function (item, index) {
+      return [run.runId, item.component, item.employeeId, name(item.employeeId), item.originalValue, item.previousValue,
+        item.value, item.reason, item.editor, item.timestamp, run.runId + ':OVERRIDE:' + index];
+    });
+    write('Override Audit', overrides);
+    var decisions = [];
+    function add(type, employeeId, decision, reason, acknowledgedBy, timestamp, details, key) {
+      decisions.push([run.runId, type, employeeId || '', employeeId ? name(employeeId) : '', decision, reason || '', evidence,
+        acknowledgedBy || '', timestamp || run.createdAt || '', JSON.stringify(details), run.runId + ':DECISION:' + key]);
+    }
+    var payload = run.decisions || {}, perEmployee = payload.employeeDecisions || {};
+    Object.keys(perEmployee).sort().forEach(function (employeeId) {
+      Object.keys(perEmployee[employeeId] || {}).sort().forEach(function (type) {
+        var value = perEmployee[employeeId][type], record = value && typeof value === 'object' ? value : {};
+        add(type, employeeId, typeof record.approved === 'boolean' ? (record.approved ? 'APPROVED' : 'DECLINED') : 'RECORDED',
+          record.reason || (Array.isArray(value) ? value.map(function (item) { return item && item.reason; }).filter(Boolean).join('; ') : ''),
+          run.createdBy, run.createdAt, value, 'EMPLOYEE:' + employeeId + ':' + type);
+      });
+    });
+    Object.keys(payload).filter(function (key) { return key !== 'employeeDecisions'; }).sort().forEach(function (type) {
+      add(type, '', 'RECORDED', '', run.createdBy, run.createdAt, payload[type], 'RUN:' + type);
+    });
+    if (run.acknowledgements && Object.keys(run.acknowledgements).length)
+      add('ACKNOWLEDGEMENTS', '', 'ACKNOWLEDGED', '', run.createdBy, run.createdAt, run.acknowledgements, 'ACKNOWLEDGEMENTS');
+    if (run.approvalCheckpoint) {
+      var approval = run.approvalCheckpoint, status = run.state === 'APPROVED' ? 'APPROVED' : run.writeBackStatus || 'PENDING';
+      add('APPROVAL', '', status, (approval.lastWriteBackError || []).map(function (item) { return item.message; }).join('; '),
+        approval.approvedBy, approval.approvedAt, { state: run.state, writeBackStatus: run.writeBackStatus, checkpoint: approval }, 'APPROVAL');
+    }
+    write('Run Decisions', decisions);
+    return { overrides: overrides.length, decisions: decisions.length };
+  }
   return { initialize: initialize, ensureManagedSheets: ensureManagedSheets, seedDefaultRules: seedDefaultRules,
-    seedHolidayCalendar: seedHolidayCalendar, renderLatestResults: renderLatestResults, appendHistory: appendHistory,
+    seedHolidayCalendar: seedHolidayCalendar, renderLatestResults: renderLatestResults, appendHistory: appendHistory, projectAuditTabs: projectAuditTabs,
     schema: function () { return JSON.parse(JSON.stringify(SHEETS)); } };
 })();

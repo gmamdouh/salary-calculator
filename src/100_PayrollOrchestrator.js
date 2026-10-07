@@ -65,7 +65,7 @@ SalaryCalculator.PayrollOrchestrator = (function () {
           Object.keys(SalaryCalculator.Constants.DEPARTMENTS).map(function (key) { return SalaryCalculator.Constants.DEPARTMENTS[key]; }) : request.departmentScope;
         var unique = [];
         scope.forEach(function (department) { if (unique.indexOf(department) === -1) unique.push(department); });
-        var unknown = unique.filter(function (department) { return !configs.some(function (config) { return config.department === department; }); });
+        var unknown = unique.filter(function (department) { return !configs.some(function (config) { return String(config.department || '').trim().toUpperCase() === department; }); });
         unknown.forEach(function (department) {
           failed[department] = true;
           errors.push(issue('UNCONFIGURED_DEPARTMENT', 'No source mapping is configured.', department));
@@ -77,10 +77,14 @@ SalaryCalculator.PayrollOrchestrator = (function () {
           attendanceByDepartment = Object.create(null), attendanceByEmployee = Object.create(null), deductionsByEmployee = Object.create(null);
         var splitSourceReads = typeof sourceGateway.readEmployeeRoster === 'function' && typeof sourceGateway.readAttendanceRows === 'function';
         unique.forEach(function (department) {
-          var config = configs.find(function (candidate) { return candidate.department === department; });
+          var config = configs.find(function (candidate) { return String(candidate.department || '').trim().toUpperCase() === department; });
           if (!config) return;
-          sourceConfigs.push(copy(config));
           try {
+            try { config = SalaryCalculator.MappingConfig.parse([config])[0]; }
+            catch (mappingError) {
+              throw Object.assign(new Error(mappingError.message), { issues: [issue('INVALID_SOURCE_MAPPING', 'Source mapping could not be parsed: ' + mappingError.message, department)] });
+            }
+            sourceConfigs.push(copy(config));
             var access = sourceGateway.validateAccess(config, splitSourceReads ? 'employee' : undefined);
             if (!access || access.valid !== true) {
               (access && access.errors || [issue('SOURCE_ACCESS_ERROR', 'Source access validation failed.')]).forEach(function (item) { errors.push(Object.assign({}, item, { department: department })); });

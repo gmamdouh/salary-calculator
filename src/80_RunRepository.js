@@ -9,7 +9,11 @@ SalaryCalculator.RunRepository = (function () {
   function text(value, label) { if (typeof value !== 'string' || !value.trim()) throw new Error(label + ' is required'); }
   function create(dependencies) {
     dependencies = dependencies || {};
-    var gateway = dependencies.gateway;
+    var adapter = dependencies.gateway, gateway = Object.create(adapter);
+    gateway.upsert = function (table, key, value) {
+      adapter.upsert(table, key, value);
+      if (table === TABLES.runs && typeof adapter.projectRunAudit === 'function') adapter.projectRunAudit(copy(value));
+    };
     function now() { return dependencies.now ? dependencies.now() : new Date().toISOString(); }
     function locked(action) {
       var lock = (dependencies.lockService || LockService).getDocumentLock();

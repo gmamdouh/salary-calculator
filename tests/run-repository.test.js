@@ -127,6 +127,25 @@ test('failed source write-back keeps a frozen checkpoint and retry completes wit
   assert.equal(gateway.list('Payroll History').filter(run => run.state === 'APPROVED').length, 1);
   assert.equal(gateway.read('Latest Results', 'EMP-001').runId, 'RUN-001');
 });
+
+test('durable run writes replay audit projections through draft, override, failed approval and recovery', () => {
+  const { repository, gateway, state } = harness();
+  const projected = [];
+  gateway.projectRunAudit = run => projected.push(plain(run));
+  repository.createDraft(runRecord({ decisions: { employeeDecisions: { 'EMP-001': { probation: { approved: true } } } } }));
+  repository.applyOverride('RUN-001', 'EMP-001', 'basic', 16000, 'Correction', 'editor');
+  state.failSource = true;
+  repository.approve('RUN-001', 'approver');
+  assert.ok(projected.some(run => run.state === 'DRAFT' && run.overrides.length === 0));
+  assert.ok(projected.some(run => run.overrides.length === 1));
+  assert.ok(projected.some(run => run.writeBackStatus === 'FAILED'));
+  state.failSource = false;
+  repository.approve('RUN-001', 'approver');
+  assert.equal(projected.at(-1).state, 'APPROVED');
+  const count = projected.length;
+  repository.approve('RUN-001', 'different-approver');
+  assert.equal(projected.length, count);
+});
 test('interrupted latest publication resumes its checkpointed projection without repeating approval writes', () => {
   const { repository, gateway, events, state } = harness();
   repository.createDraft(runRecord());

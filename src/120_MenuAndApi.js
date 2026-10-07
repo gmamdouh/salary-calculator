@@ -172,11 +172,11 @@ SalaryCalculator.MenuAndApi = (function () {
     }
     function getConfigs() {
       var rows = readRows('Sources & Mappings');
-      return SalaryCalculator.MappingConfig.parse(rows.slice(1).filter(function (row) { return String(row[0] || '').trim(); }).map(function (row) {
+      return rows.slice(1).filter(function (row) { return String(row[0] || '').trim(); }).map(function (row) {
         return { department: row[0], spreadsheetId: row[1], leaveSpreadsheetId: row[2], employeeTab: row[3], attendanceTab: row[4],
           employeeHeaderRow: row[5], attendanceHeaderRow: row[6], employeeColumns: row[7], attendanceColumns: row[8], approvalColumns: row[9],
           deductionSpreadsheetId: row[12], deductionTab: row[13], deductionHeaderRow: row[14], deductionColumns: row[15] };
-      }));
+      });
     }
     function getRules() {
       var rules = { salaries: {} };
@@ -255,6 +255,10 @@ SalaryCalculator.MenuAndApi = (function () {
             value.amount, value.payrollMonth, value.runId, value.paid === true, value.paymentDate || '', value.decision || '', value.eligibility || '', value.notes || '']]);
         } else if (table === 'Latest Results') sheet('Latest Results');
       },
+      projectRunAudit: function (run) {
+        sheet('Override Audit'); sheet('Run Decisions');
+        SalaryCalculator.WorkbookSetup.projectAuditTabs(sheets, run);
+      },
       renderLatestResults: function () {
         sheet('Latest Results');
         var latestResults = repository.listLatestResults().map(function (record) {
@@ -288,10 +292,15 @@ SalaryCalculator.MenuAndApi = (function () {
     function getEmployees() {
       var period = SalaryCalculator.PayrollPeriod.buildPeriod({ payrollMonth: Utilities.formatDate(new Date(), book.getSpreadsheetTimeZone(), 'yyyy-MM'),
         cutoffMode: 'MONTH_END', today: Utilities.formatDate(new Date(), book.getSpreadsheetTimeZone(), 'yyyy-MM-dd') });
-      return getConfigs().reduce(function (all, config) {
-        var bundle = sourceGateway.readDepartment(config, period);
-        return all.concat(bundle.employeeRows.map(function (row) { var employee = SalaryCalculator.MappingConfig.normalizeEmployee(row, config);
-          return { employeeId: employee.employeeId, americanName: employee.americanName, department: employee.department }; }));
+      return getConfigs().reduce(function (all, row) {
+        try {
+          var config = SalaryCalculator.MappingConfig.parse([row])[0], bundle = sourceGateway.readDepartment(config, period);
+          return all.concat(bundle.employeeRows.map(function (item) { var employee = SalaryCalculator.MappingConfig.normalizeEmployee(item, config);
+            return { employeeId: employee.employeeId, americanName: employee.americanName, department: employee.department }; }));
+        } catch (error) {
+          // Setup may show healthy employees; Validate reports the failed department.
+          return all;
+        }
       }, []);
     }
     var orchestrator = SalaryCalculator.PayrollOrchestrator.create({ sourceGateway: sourceGateway, repository: repository,
@@ -315,9 +324,16 @@ SalaryCalculator.MenuAndApi = (function () {
       makeAuditBlob: function (value, type, name) { return Utilities.newBlob(value, type, name); },
       makeImageBlob: function (bytes, type, name) { return Utilities.newBlob(bytes, type, name); } });
     api.configurationCheck = function () {
-      var configs = getConfigs(), mapping = SalaryCalculator.MappingConfig.validate(configs), access = configs.map(function (config) {
+      var configs = [], parseErrors = [];
+      getConfigs().forEach(function (row) {
+        try { configs.push(SalaryCalculator.MappingConfig.parse([row])[0]); }
+        catch (error) { parseErrors.push({ code: 'INVALID_SOURCE_MAPPING', department: String(row.department || '').toUpperCase(), message: error.message }); }
+      });
+      var mapping = SalaryCalculator.MappingConfig.validate(configs), access = configs.map(function (config) {
         var result = sourceGateway.validateAccess(config); return { department: config.department, valid: result.valid, errors: result.errors };
       });
+      mapping.errors = mapping.errors.concat(parseErrors);
+      mapping.valid = mapping.errors.length === 0;
       return { valid: mapping.valid && access.every(function (item) { return item.valid; }), mapping: mapping, sources: access };
     };
     api.initializeWorkbook = function () { return SalaryCalculator.WorkbookSetup.initialize(book); };

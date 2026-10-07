@@ -148,6 +148,22 @@ test('unmatched Survey deduction Employee ID blocks the department with source c
   assert.deepEqual(plain(report.errors[0].source), { spreadsheetId: 'survey-deductions', tab: 'Charges', row: 7, date: '2026-09-14' });
 });
 
+test('malformed Survey deduction mapping blocks Survey while All retains healthy departments', () => {
+  const fx = integration(true);
+  fx.configs[0].department = 'survey';
+  fx.configs[0].deductionColumns = '{broken json';
+  const request = { payrollMonth: '2026-09', cutoffMode: 'MONTH_END' };
+  const all = fx.orchestrator.validateRequest({ ...request, departmentScope: ['ALL'] });
+  assert.equal(all.valid, true);
+  assert.deepEqual(plain(all.failedDepartments), ['SURVEY']);
+  assert.equal(all.errors[0].department, 'SURVEY');
+  assert.equal(all.errors[0].code, 'INVALID_SOURCE_MAPPING');
+  assert.equal(all.employees.length, 4);
+  const survey = fx.orchestrator.validateRequest({ ...request, departmentScope: ['SURVEY'] });
+  assert.equal(survey.valid, false);
+  assert.equal(survey.errors[0].department, 'SURVEY');
+});
+
 test('all-department draft, audited override, approval recovery, history, and ledger are durable', () => {
   const fx = integration();
   const draft = fx.orchestrator.calculateDraft({ payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['ALL'], decisions: {
