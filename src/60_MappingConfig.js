@@ -19,7 +19,7 @@ SalaryCalculator.MappingConfig = (function () {
   var employeeRequired = ['employeeId', 'americanName', 'firstWorkingDay'];
   var attendanceRequired = ['employeeId', 'date', 'status'];
   function issue(mapping, kind, row, field, code, message, column) {
-    return { code: code, message: message, field: field, spreadsheetId: kind === 'attendance' ? mapping.leaveSpreadsheetId : mapping.spreadsheetId,
+    return { code: code, message: message, field: field, spreadsheetId: kind === 'attendance' ? mapping.leaveSpreadsheetId : kind === 'deduction' ? mapping.deductionSpreadsheetId : mapping.spreadsheetId,
       tab: mapping[kind + 'Tab'], row: row, column: column === undefined ? null : column };
   }
   function fail(issues) {
@@ -51,6 +51,22 @@ SalaryCalculator.MappingConfig = (function () {
           mappedHeaders[mapped[field]] = true;
         });
       });
+      if (config.deductionSpreadsheetId || config.deductionTab || config.deductionColumns) {
+        try { spreadsheetId(config.deductionSpreadsheetId); } catch (error) { add('deductionSpreadsheetId', error.message); }
+        if (!text(config.deductionTab)) add('deductionTab', 'Deduction tab is required');
+        if (config.deductionHeaderRow !== undefined && (!Number.isInteger(config.deductionHeaderRow) || config.deductionHeaderRow < 1)) add('deductionHeaderRow', 'Header row must be a positive integer');
+        var deduction = config.deductionColumns;
+        if (!deduction || typeof deduction !== 'object' || Array.isArray(deduction)) add('deductionColumns', 'Deduction columns must be an object');
+        else {
+          ['employeeId', 'amount'].forEach(function (field) { if (!text(deduction[field])) add(field, 'Required deduction column mapping'); });
+          if (!!deduction.date === !!deduction.payrollMonth) add('deductionColumns', 'Map exactly one of date or payrollMonth');
+          var names = Object.create(null);
+          Object.keys(deduction).forEach(function (field) {
+            if (['employeeId', 'amount', 'date', 'payrollMonth', 'reason'].indexOf(field) === -1 || !text(deduction[field]) || names[deduction[field]]) add(field, 'Deduction fields require distinct nonempty supported headers');
+            names[deduction[field]] = true;
+          });
+        }
+      }
       if (config.approvalColumns !== undefined) {
         var approval = config.approvalColumns, seenApproval = Object.create(null);
         if (!approval || typeof approval !== 'object' || Array.isArray(approval)) add('approvalColumns', 'Approval columns must be an object');
@@ -91,10 +107,15 @@ SalaryCalculator.MappingConfig = (function () {
       config.department = text(row.department).toUpperCase();
       config.spreadsheetId = spreadsheetId(row.spreadsheetId);
       config.leaveSpreadsheetId = spreadsheetId(row.leaveSpreadsheetId);
+      if (text(row.deductionSpreadsheetId)) config.deductionSpreadsheetId = spreadsheetId(row.deductionSpreadsheetId);
+      else delete config.deductionSpreadsheetId;
       config.employeeColumns = columns(row.employeeColumns);
       config.attendanceColumns = columns(row.attendanceColumns);
+      if (text(row.deductionColumns)) config.deductionColumns = columns(row.deductionColumns);
+      else delete config.deductionColumns;
       ['approvalColumns', 'statusCodes'].forEach(function (field) { if (text(row[field])) config[field] = columns(row[field]); else delete config[field]; });
       ['employeeHeaderRow', 'attendanceHeaderRow'].forEach(function (field) { config[field] = text(row[field]) ? Number(row[field]) : 1; });
+      if (config.deductionSpreadsheetId || config.deductionTab || config.deductionColumns) config.deductionHeaderRow = text(row.deductionHeaderRow) ? Number(row.deductionHeaderRow) : 1;
       if (!text(row.dateFormat)) delete config.dateFormat;
       return config;
     });
@@ -110,6 +131,12 @@ SalaryCalculator.MappingConfig = (function () {
         if (text(value) || field === 'firstWorkingDay') {
           try { record[field] = date(value, mapping.dateFormat); } catch (error) { add('INVALID_DATE', error.message); }
         }
+      } else if (field === 'agents') {
+        try {
+          var agents = text(value) ? (Array.isArray(value) ? value : JSON.parse(text(value))) : [];
+          if (!Array.isArray(agents)) throw new Error('Expected an array of assigned agents');
+          performance.agents = agents;
+        } catch (error) { add('INVALID_AGENTS', 'Expected a JSON array of assigned agents'); }
       } else if (['transfers', 'sales', 'activeCalls', 'conversionRate', 'annualLeaveBalance', 'manualDeduction'].indexOf(field) !== -1) {
         if (text(value)) {
           var number = typeof value === 'number' ? value : (/^\d+(?:\.\d+)?$/.test(text(value)) ? Number(text(value)) : NaN);
@@ -157,5 +184,28 @@ SalaryCalculator.MappingConfig = (function () {
     if (errors.length) fail(errors);
     return records;
   }
-  return { parse: parse, validate: validate, normalizeEmployee: normalizeEmployee, normalizeAttendance: normalizeAttendance };
+  function normalizeDeductions(rows, mapping, period) {
+    if (!mapping.deductionColumns) return [];
+    var mapped = mapping.deductionColumns, records = [], errors = [], seen = Object.create(null);
+    if (mapped.payrollMonth && !period.isComplete) fail([issue(mapping, 'deduction', mapping.deductionHeaderRow || 1, 'payrollMonth', 'PARTIAL_MONTH_DEDUCTION', 'Month-only deductions cannot be used with a partial cutoff')]);
+    rows.forEach(function (row) {
+      var source = cells(row, mapping, 'deduction'), values = source.values, employeeId = text(values.employeeId), amount = Number(values.amount), when;
+      function add(field, code, message) { errors.push(issue(mapping, 'deduction', source.rowNumber, field, code, message, source.positions[field])); }
+      if (!employeeId) add('employeeId', 'MISSING_EMPLOYEE_ID', 'Deduction Employee ID is required');
+      if (!text(values.amount) || !Number.isFinite(amount) || amount <= 0) add('amount', 'INVALID_DEDUCTION_AMOUNT', 'Deduction amount must be positive and finite');
+      if (mapped.date) { try { when = date(values.date, mapping.dateFormat); } catch (error) { add('date', 'INVALID_DATE', error.message); } }
+      else { when = text(values.payrollMonth); if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(when)) add('payrollMonth', 'INVALID_PAYROLL_MONTH', 'Expected YYYY-MM'); }
+      if (!employeeId || !Number.isFinite(amount) || amount <= 0 || !when) return;
+      if (mapped.date ? when < period.startDate || when > period.endDate : when !== period.payrollMonth) return;
+      var reason = text(values.reason) || 'Imported deduction from ' + mapping.deductionTab + ' row ' + source.rowNumber;
+      var key = JSON.stringify([employeeId, when, amount, text(values.reason)]);
+      if (seen[key]) add('employeeId', 'DUPLICATE_DEDUCTION', 'Duplicate deduction row for Employee ID, period, amount and reason');
+      seen[key] = true;
+      records.push({ employeeId: employeeId, amount: amount, reason: reason, source: { spreadsheetId: mapping.deductionSpreadsheetId,
+        tab: mapping.deductionTab, row: source.rowNumber, date: mapped.date ? when : undefined, payrollMonth: mapped.payrollMonth ? when : undefined } });
+    });
+    if (errors.length) fail(errors);
+    return records;
+  }
+  return { parse: parse, validate: validate, normalizeEmployee: normalizeEmployee, normalizeAttendance: normalizeAttendance, normalizeDeductions: normalizeDeductions };
 })();

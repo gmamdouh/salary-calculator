@@ -8,7 +8,7 @@ SalaryCalculator.SpreadsheetGateway = (function () {
     function app() { return dependencies.spreadsheetApp || SpreadsheetApp; }
     function fail(errors) { var error = new Error(errors.map(function (item) { return item.code + ': ' + item.message; }).join('; ')); error.issues = errors; throw error; }
     function issue(config, kind, code, message, row, column, field) {
-      return { code: code, message: message, spreadsheetId: kind === 'employee' ? config.spreadsheetId : config.leaveSpreadsheetId,
+      return { code: code, message: message, spreadsheetId: kind === 'employee' ? config.spreadsheetId : kind === 'deduction' ? config.deductionSpreadsheetId : config.leaveSpreadsheetId,
         tab: config[kind + 'Tab'], row: row || config[kind + 'HeaderRow'] || 1, column: column || null, field: field || null };
     }
     function configured(config) {
@@ -18,7 +18,7 @@ SalaryCalculator.SpreadsheetGateway = (function () {
       return parsed;
     }
     function readTable(config, kind, books) {
-      var id = kind === 'employee' ? config.spreadsheetId : config.leaveSpreadsheetId;
+      var id = kind === 'employee' ? config.spreadsheetId : kind === 'deduction' ? config.deductionSpreadsheetId : config.leaveSpreadsheetId;
       var book = books[id] || (books[id] = app().openById(id));
       var sheet = book.getSheetByName(config[kind + 'Tab']);
       if (!sheet) fail([issue(config, kind, 'MISSING_TAB', 'Configured source tab is missing')]);
@@ -71,6 +71,10 @@ SalaryCalculator.SpreadsheetGateway = (function () {
       config = configured(config);
       return readTable(config, 'attendance', Object.create(null)).rows;
     }
+    function readDeductionRows(config) {
+      config = configured(config);
+      return config.deductionSpreadsheetId ? readTable(config, 'deduction', Object.create(null)).rows : [];
+    }
     function readDepartment(config, period) {
       config = configured(config);
       var employeeTable = readTable(config, 'employee', Object.create(null)), attendanceTable = readTable(config, 'attendance', Object.create(null));
@@ -91,6 +95,7 @@ SalaryCalculator.SpreadsheetGateway = (function () {
         var books = Object.create(null);
         if (!kind || kind === 'employee') readTable(config, 'employee', books);
         if (!kind || kind === 'attendance') readTable(config, 'attendance', books);
+        if ((!kind || kind === 'deduction') && config.deductionSpreadsheetId) readTable(config, 'deduction', books);
         return { valid: true, errors: [], warnings: [], writeAccessVerified: false };
       } catch (error) {
         return { valid: false, errors: error.issues || [{ code: 'ACCESS_ERROR', message: 'Unable to read configured source workbook' }], warnings: [], writeAccessVerified: false };
@@ -148,7 +153,7 @@ SalaryCalculator.SpreadsheetGateway = (function () {
       }
     }
     return { readDepartment: readDepartment, readEmployeeRoster: readEmployeeRoster,
-      readAttendanceRows: readAttendanceRows, validateAccess: validateAccess, writeApprovalState: writeApprovalState };
+      readAttendanceRows: readAttendanceRows, readDeductionRows: readDeductionRows, validateAccess: validateAccess, writeApprovalState: writeApprovalState };
   }
   return { create: create,
     createMaster: function () {
@@ -192,6 +197,7 @@ SalaryCalculator.SpreadsheetGateway = (function () {
     readDepartment: function (config, period) { return create().readDepartment(config, period); },
     readEmployeeRoster: function (config) { return create().readEmployeeRoster(config); },
     readAttendanceRows: function (config) { return create().readAttendanceRows(config); },
+    readDeductionRows: function (config) { return create().readDeductionRows(config); },
     validateAccess: function (config, kind) { return create().validateAccess(config, kind); },
     writeApprovalState: function (config, writes) { return create().writeApprovalState(config, writes); } };
 })();

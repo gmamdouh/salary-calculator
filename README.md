@@ -1,0 +1,52 @@
+# Salary Calculator
+
+Google Sheets payroll for Survey, Reservations, Sales, TDS, and Management. The Apps Script source is in `src/`; local Node tests do not access live workbooks.
+
+## Local verification and deployment boundary
+
+Install Node.js, then run `npm test` from this repository. For a focused full-flow check, run `node --test tests/end-to-end.test.js`. The fixtures cover each department, probation and referral decisions, Sales quarterly ABS, holiday work, NS, final settlement, override audit, approval retry, and the optional Survey deduction import. They do not establish that live spreadsheet headers, permissions, data, or Cloud Vision work.
+
+Create a container-bound Apps Script project for the intended master payroll workbook. Keep its real `.clasp.json` local and ignored by Git; set `rootDir` to `src` only after checking the project structure. Do not copy an ID from another environment or commit credentials. `.claspignore` is restricted to `src/*.js`, `src/*.html`, and `src/appsscript.json`; verify the actual upload list with `clasp status`. `src/appsscript.json` declares spreadsheet, Drive, external request, container UI, and user email scopes needed by the code. The Apps Script project ID has not been supplied, so this repository is not linked or ready to push.
+
+Before any upload, run `C:\Users\brand\.codex\skills\apps-script-clasp-deploy\scripts\preflight.ps1` in PowerShell, check the resolved folder, script ID, `rootDir`, login account, Git state, and `clasp status`, then compare any remote edits separately. A live push requires explicit confirmation of the folder and script ID. Do not use `clasp push --force` to bypass a mismatch.
+
+## Deployment inputs supplied by the operator
+
+These IDs are inputs for configuration, not runtime constants. No live workbook has been accessed or changed by the local verification.
+
+| Role | Workbook ID | Where to use it |
+| --- | --- | --- |
+| Master/database workbook | `1v42pVL43tws-9gxqSoAvxCotTlDUVyAtHUBbyYAh-A0` | Confirm this is the intended master payroll container before binding the script. |
+| Survey Leave Tracker | `1K-OyVwK4vAhOMkPA0J4QmQlD1njdSs31cU7h3JyGoPU` | Survey Leave Tracker Workbook ID. |
+| Sales Leave Tracker | `1wT1EuW-JM7Hd09hehrsGzsSqgM9LXAKZbHrzsBGQ2iE` | Sales Leave Tracker Workbook ID. |
+| Reservations Leave Tracker | `181W3QL34llnpmJp_eqIsfyOiGoBfX7IHLONoM680Gqw` | Reservations Leave Tracker Workbook ID. |
+| Management and TDS shared Leave Tracker | `1xbQyC0GpHJxEf2djSERqyWNWIeA81eIX-aalWL7Di2A` | Use the same ID in both department mapping rows, with each department's verified tab and headers. |
+| Survey deduction source only | `1XXn6Uum33kKCh9y_tG6GxjoOyu17BqxqgPXsXVoewY4` | Optional Survey Deduction Workbook ID; verify tab and headers before enabling. |
+
+The five **employee workbook IDs** and all live tab/header mappings still need operator verification. Do not assume that the master/database ID is each department's employee source. No deduction workbook is configured for Sales, Reservations, TDS, or Management; enter their manual deductions by editing the draft deductions component, recording a reason, and saving the audited override.
+
+## Master workbook setup
+
+With the intended master workbook open, use **Salary Calculator → Initialize/Repair Workbook**. This creates or repairs Dashboard, Sources & Mappings, Salary Rules, Holiday Calendar, Latest Results, Payroll History, Payment Ledger, Override Audit, Run Decisions, and the protected Payroll Runs technical tab. Review seeded salary/holiday rows before the first payroll. Reopening the workbook adds the custom menu through `onOpen`.
+
+In **Sources & Mappings**, create one row per department. Set its employee and Leave Tracker workbook IDs, tab names, header row numbers, and JSON column maps. Required employee keys are `employeeId`, `americanName`, and `firstWorkingDay`; required attendance keys are `employeeId`, `date`, and `status`. Map other available fields such as `lastWorkingDay`, `annualLeaveBalance`, `transfers`, `sales`, and `conversionRate`. For TDS, `agents` may map to a cell containing a JSON array of the assigned agents and their transfer counts, for example `[ { "performance": { "transfers": 76 } } ]`; confirm the source layout before enabling that map. Map approval status columns only to distinct writable source headers, never to employee data columns. Mapping keys name canonical fields; mapping values must exactly match live source headers. Dates use ISO `YYYY-MM-DD` unless an explicitly supported date format is configured in code. Run **Salary Calculator → Configuration Check** and resolve every reported workbook/tab/header access error before payroll.
+
+Employee ID must be nonblank, unique within each department and globally across all five employee rosters, and stable across employee, attendance, deduction, history, and approval write-back data. Names and sheet row positions are not identities. Attendance requires one row per Employee ID and date; statuses normalize to `PRESENT`, `LEAVE`, `NS`, `OFF`, `HOLIDAY`, or `ABSENT`. An ID collision or orphan attendance/deduction record blocks the affected department. Preserve leading zeroes in source IDs.
+
+For Survey's optional external deductions, fill **Deduction Workbook ID**, **Deduction Tab**, **Deduction Header Row**, and **Deduction Column Mappings** on the Survey row only. The JSON map requires `employeeId` and `amount` plus exactly one of `date` or `payrollMonth`; `reason` is optional. Example keys with placeholder headers: `{ "employeeId": "<verified ID header>", "amount": "<verified amount header>", "date": "<verified date header>", "reason": "<verified reason header>" }`. Use the actual headers from the Survey sheet. Amounts must be positive finite numbers. Date records are included only through the selected cutoff; a month-only map is permitted only for a complete month-end run. Exact duplicate records, invalid amounts, and unmatched IDs stop Survey with source coordinates. The draft audit retains the imported workbook, tab, row, and date/month for each deduction. Other departments leave all deduction mapping cells blank and use documented manual deductions with reasons.
+
+In **Salary Rules**, confirm salary rows for each department and enter the company-wide Sales quarterly cycle as `Rule Type = CYCLE`, `Department = SALES`, `Rule Key = quarterly payment months`, and `Value =` comma-separated month numbers such as `3,6,9,12` only if those are the approved payment months. This is a deployment decision; the fixture's cycle is not authorization to use it live. Sales monthly ABS accrues separately and is paid according to this cycle. Review the Holiday Calendar's actual dates and confirmed status before selecting a holiday in a run.
+
+## Cloud Vision and restricted evidence storage
+
+Enable Cloud Vision for the intended Google Cloud project and arrange a valid API key with access to text detection. Set Script Properties `CLOUD_VISION_API_KEY` and `OCR_AUDIT_FOLDER_ID`. The latter is the ID of a restricted Drive folder to which the script identity can write; limit access to payroll auditors. Originals, OCR output, confirmations, uploader, and timestamps belong in this evidence trail. Do not put the key or folder ID in source code, a spreadsheet cell, `.clasp.json`, or Git. Test one authorized screenshot and one rejected/unmatched name in the live environment before relying on OCR for payroll.
+
+Set Script Property `PAYROLL_APPROVER_EMAILS` to the authorized approvers' email addresses, separated by commas or newlines. Approval is fail-closed if this setting is absent or empty. The active user's email must be available to Apps Script and match an allowlisted address. Drafting can continue without an approver setting; approval cannot.
+
+## Operator run and recovery
+
+Open **Salary Calculator → Run Payroll**, or assign a Sheets drawing/button to the `showPayrollSidebar` function. The sidebar proceeds through Setup, Validate, Decisions, Draft, and Approve. Select payroll month, Today or Month End cutoff, department or All, and any holiday. Validate source access and correct blocking errors. For an All run with failed departments, review the exact omitted-department/error report and explicitly acknowledge it to continue healthy departments; if the report changes, acknowledge the new report. Resolve probation/referral/holiday choices and any pasted-name or screenshot matches; unconfirmed OCR entries block drafting.
+
+Review every component and total in the draft, including imported Survey deductions and manual deductions for other departments. Overrides require a reason and are retained with original value, editor, and timestamp in Override Audit. Review Latest Results active and final-settlement sections and the immutable Payroll History, Payment Ledger, and Run Decisions records. The approver then uses **Approve payroll**. Approval is protected by a lock and writes only configured payroll/payment status fields back to employee sources by Employee ID. A draft never marks a payment as paid.
+
+If source write-back fails, record the run ID and reported department/error, fix source permissions, protected ranges, IDs, or mapped headers, then retry approval for the same run ID. The run remains resumable; do not start a replacement run or mark payment manually merely to bypass the error. The repository checkpoints approval so a retry does not duplicate history or one-time payments. Reconcile the source status, Payment Ledger, Latest Results, and Payroll History after recovery. Before live operation, manually compare the approved reference examples: Sales 4.2%/37 = EGP 24,050; Sales 6.1%/53 = EGP 68,900; active sample = EGP 15,000; final-settlement sample = EGP 16,600.

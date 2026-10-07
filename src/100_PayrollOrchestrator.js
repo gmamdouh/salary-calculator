@@ -74,7 +74,7 @@ SalaryCalculator.PayrollOrchestrator = (function () {
         else period = SalaryCalculator.PayrollPeriod.buildPeriod({ payrollMonth: request.payrollMonth, cutoffMode: request.cutoffMode,
           today: (request.today || now()).slice(0, 10) });
         var employees = [], inputs = [], sourceSnapshot = {}, sourceConfigs = [],
-          attendanceByDepartment = Object.create(null), attendanceByEmployee = Object.create(null);
+          attendanceByDepartment = Object.create(null), attendanceByEmployee = Object.create(null), deductionsByEmployee = Object.create(null);
         var splitSourceReads = typeof sourceGateway.readEmployeeRoster === 'function' && typeof sourceGateway.readAttendanceRows === 'function';
         unique.forEach(function (department) {
           var config = configs.find(function (candidate) { return candidate.department === department; });
@@ -119,6 +119,22 @@ SalaryCalculator.PayrollOrchestrator = (function () {
               if (!ids[record.employeeId]) throw Object.assign(new Error('Attendance Employee ID is absent from employee source'), { issues: [issue('UNMATCHED_EMPLOYEE_ID', 'Attendance Employee ID is absent from employee source.', department, { employeeId: record.employeeId })] });
             });
             attendanceByDepartment[department] = attendance;
+            if (config.deductionSpreadsheetId) {
+              access = sourceGateway.validateAccess(config, 'deduction');
+              if (!access || access.valid !== true) {
+                (access && access.errors || [issue('SOURCE_ACCESS_ERROR', 'Deduction source access validation failed.')]).forEach(function (item) { errors.push(Object.assign({}, item, { department: department })); });
+                failed[department] = true; return;
+              }
+              var deductionRows = sourceGateway.readDeductionRows(config);
+              sourceSnapshot[department].deductionRows = copy(deductionRows);
+              var deductions = SalaryCalculator.MappingConfig.normalizeDeductions(deductionRows, config, period);
+              deductions.forEach(function (deduction) {
+                if (!ids[deduction.employeeId]) throw Object.assign(new Error('Deduction Employee ID is absent from employee source'), {
+                  issues: [issue('UNMATCHED_DEDUCTION_EMPLOYEE_ID', 'Deduction Employee ID is absent from employee source.', department,
+                    { employeeId: deduction.employeeId, source: deduction.source })] });
+                (deductionsByEmployee[deduction.employeeId] || (deductionsByEmployee[deduction.employeeId] = [])).push(deduction);
+              });
+            }
           } catch (error) {
             failed[department] = true;
             (error.issues || [issue('SOURCE_ERROR', error.message || 'Unable to read department source.', department)]).forEach(function (item) {
@@ -143,6 +159,11 @@ SalaryCalculator.PayrollOrchestrator = (function () {
         inputs = inputs.filter(function (employee) { return !failed[employee.department]; });
         employees = employees.filter(function (employee) { return !failed[employee.department]; });
         sourceConfigs = sourceConfigs.filter(function (config) { return !failed[config.department]; });
+        var acceptedEmployeeIds = Object.create(null);
+        inputs.forEach(function (employee) { acceptedEmployeeIds[employee.employeeId] = true; });
+        Object.keys(deductionsByEmployee).forEach(function (employeeId) {
+          if (!acceptedEmployeeIds[employeeId]) delete deductionsByEmployee[employeeId];
+        });
         inputs.forEach(function (employee) {
           attendanceByEmployee[employee.employeeId] = (attendanceByDepartment[employee.department] || []).filter(function (record) {
             return record.employeeId === employee.employeeId;
@@ -165,7 +186,7 @@ SalaryCalculator.PayrollOrchestrator = (function () {
         var failedDepartments = unique.filter(function (department) { return failed[department]; });
         return { valid: errors.length === 0 || (allMode && inputs.length > 0), errors: errors, warnings: warnings, payrollMonth: request.payrollMonth,
           cutoffMode: request.cutoffMode, departmentScope: unique, period: period, employees: employees, inputs: inputs,
-          attendanceByEmployee: attendanceByEmployee, sourceSnapshot: sourceSnapshot, sourceConfigs: sourceConfigs,
+          attendanceByEmployee: attendanceByEmployee, deductionsByEmployee: deductionsByEmployee, sourceSnapshot: sourceSnapshot, sourceConfigs: sourceConfigs,
           failedDepartments: failedDepartments, departmentErrors: errors,
           partialDepartmentsFingerprint: partialDepartmentsFingerprint(failedDepartments, errors), runId: runId(), decisions: copy(request.decisions || {}),
           decisionRequirements: decisionRequirements, unresolvedDecisionCount: decisionRequirements.length };
@@ -185,6 +206,13 @@ SalaryCalculator.PayrollOrchestrator = (function () {
           partialDepartmentsFingerprint: report.partialDepartmentsFingerprint, employees: report.employees };
       }
       var decisions = copy(request.decisions || report.decisions || {});
+      decisions.employeeDecisions = decisions.employeeDecisions || {};
+      Object.keys(report.deductionsByEmployee || {}).forEach(function (employeeId) {
+        var employeeDecisions = decisions.employeeDecisions[employeeId] || (decisions.employeeDecisions[employeeId] = {});
+        employeeDecisions.deductions = (employeeDecisions.deductions || []).concat(report.deductionsByEmployee[employeeId].map(function (record) {
+          return { amount: record.amount, reason: record.reason, source: record.source };
+        }));
+      });
       if (report.decisionRequirements && report.decisionRequirements.length) {
         return { valid: false, state: 'BLOCKED', runId: request.runId || report.runId,
           errors: report.decisionRequirements.map(function (requirement) {

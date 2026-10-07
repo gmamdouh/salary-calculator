@@ -72,7 +72,8 @@ test('attendance layouts use Employee ID and date, filter the cutoff, and block 
 });
 
 function fakeSpreadsheets() {
-  const tables = { Team: [['title'], sourceRow().headers, sourceRow().values], Days: [['ID', 'Day', 'Code'], ['EMP-001', '2026-09-01', 'PRESENT']] };
+  const tables = { Team: [['title'], sourceRow().headers, sourceRow().values], Days: [['ID', 'Day', 'Code'], ['EMP-001', '2026-09-01', 'PRESENT']],
+    Charges: [['Staff ID', 'Charge', 'When'], ['EMP-001', 125, '2026-09-10']] };
   const reads = [], writes = [], opened = [], displays = {};
   const sheets = Object.fromEntries(Object.keys(tables).map(name => [name, {
     getDataRange() { return { getValues() { reads.push(name + ':typed'); return tables[name].map(row => row.slice()); }, getDisplayValues() { reads.push(name + ':display'); return (displays[name] || tables[name]).map(row => row.map(value => String(value ?? ''))); } }; },
@@ -84,7 +85,7 @@ function fakeSpreadsheets() {
   }]));
   const app = { openById(id) {
     opened.push(id);
-    if (!['fixture-source', 'fixture-leave'].includes(id)) throw new Error('Access denied');
+    if (!['fixture-source', 'fixture-leave', 'fixture-deduction'].includes(id)) throw new Error('Access denied');
     return { getSheetByName(name) { return sheets[name] || null; }, getSpreadsheetTimeZone() { return 'Africa/Cairo'; } };
   } };
   return { app, tables, reads, writes, opened, displays, sheets };
@@ -199,6 +200,46 @@ test('configured approval headers are included in read-only access validation', 
   assert.equal(report.errors[0].code, 'MISSING_HEADER');
   assert.equal(report.errors[0].field, 'paid');
   assert.equal(fake.writes.length, 0);
+});
+
+test('optional deduction mapping filters by cutoff and preserves source row evidence', () => {
+  const { MappingConfig, PayrollPeriod } = loadAppsScript();
+  const config = MappingConfig.parse([mappingConfig({ deductionSpreadsheetId: 'survey-deductions', deductionTab: 'Charges',
+    deductionColumns: '{"employeeId":"Staff ID","amount":"Charge","date":"When","reason":"Why"}' })])[0];
+  assert.equal(MappingConfig.validate([config]).valid, true);
+  const period = PayrollPeriod.buildPeriod(periodOptions());
+  const rows = [
+    { headers: ['Staff ID', 'Charge', 'When', 'Why'], values: ['EMP-001', 125, '2026-09-10', 'Equipment'], rowNumber: 4 },
+    { headers: ['Staff ID', 'Charge', 'When', 'Why'], values: ['EMP-001', 50, '2026-10-01', 'Later'], rowNumber: 5 }
+  ];
+  assert.deepEqual(plain(MappingConfig.normalizeDeductions(rows, config, period)), [{ employeeId: 'EMP-001', amount: 125, reason: 'Equipment',
+    source: { spreadsheetId: 'survey-deductions', tab: 'Charges', row: 4, date: '2026-09-10' } }]);
+});
+
+test('deduction mapping rejects duplicate, invalid and unsafe month-only cutoff rows', () => {
+  const { MappingConfig, PayrollPeriod } = loadAppsScript();
+  const config = mappingConfig({ deductionSpreadsheetId: 'survey-deductions', deductionTab: 'Charges',
+    deductionColumns: { employeeId: 'ID', amount: 'Amount', payrollMonth: 'Month' } });
+  const month = PayrollPeriod.buildPeriod(periodOptions());
+  const row = { ID: 'EMP-001', Amount: 100, Month: '2026-09' };
+  assert.throws(() => MappingConfig.normalizeDeductions([row, row], config, month), error => error.issues[0].code === 'DUPLICATE_DEDUCTION');
+  assert.throws(() => MappingConfig.normalizeDeductions([{ ...row, rowNumber: 3 }, { ...row, rowNumber: 4 }], config, month),
+    error => error.issues[0].code === 'DUPLICATE_DEDUCTION' && error.issues[0].row === 4);
+  assert.throws(() => MappingConfig.normalizeDeductions([{ ...row, Amount: -5 }], config, month), error => error.issues[0].code === 'INVALID_DEDUCTION_AMOUNT');
+  const partial = PayrollPeriod.buildPeriod(periodOptions({ payrollMonth: '2026-10', cutoffMode: 'TODAY' }));
+  assert.throws(() => MappingConfig.normalizeDeductions([row], config, partial), error => error.issues[0].code === 'PARTIAL_MONTH_DEDUCTION');
+  assert.equal(MappingConfig.validate([mappingConfig({ deductionSpreadsheetId: 'survey-deductions', deductionTab: 'Charges',
+    deductionColumns: { employeeId: 'ID', amount: 'Amount' } })]).valid, false);
+});
+
+test('gateway reads optional deduction source with displayed Employee ID and validates access', () => {
+  const fake = fakeSpreadsheets(), gateway = loadAppsScript().SpreadsheetGateway.create({ spreadsheetApp: fake.app });
+  const config = mappingConfig({ deductionSpreadsheetId: 'fixture-deduction', deductionTab: 'Charges',
+    deductionColumns: { employeeId: 'Staff ID', amount: 'Charge', date: 'When' } });
+  assert.equal(gateway.validateAccess(config).valid, true);
+  assert.equal(gateway.readDeductionRows(config)[0].displayValues[0], 'EMP-001');
+  fake.tables.Charges[0][1] = 'Wrong';
+  assert.equal(gateway.validateAccess(config).errors[0].code, 'MISSING_HEADER');
 });
 
 test('final payroll payment dates normalize configured source formats to ISO and allow blanks', () => {

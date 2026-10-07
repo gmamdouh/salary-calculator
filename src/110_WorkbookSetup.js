@@ -2,7 +2,7 @@
 SalaryCalculator.WorkbookSetup = (function () {
   var SHEETS = {
     'Dashboard': { headers: ['Section', 'Value', 'Updated At'] },
-    'Sources & Mappings': { headers: ['Department', 'Employee Workbook ID', 'Leave Tracker Workbook ID', 'Employee Tab', 'Attendance Tab', 'Employee Header Row', 'Attendance Header Row', 'Employee Column Mappings', 'Attendance Column Mappings', 'Approval Column Mappings', 'Access Check', 'Last Checked'] },
+    'Sources & Mappings': { headers: ['Department', 'Employee Workbook ID', 'Leave Tracker Workbook ID', 'Employee Tab', 'Attendance Tab', 'Employee Header Row', 'Attendance Header Row', 'Employee Column Mappings', 'Attendance Column Mappings', 'Approval Column Mappings', 'Access Check', 'Last Checked', 'Deduction Workbook ID', 'Deduction Tab', 'Deduction Header Row', 'Deduction Column Mappings'] },
     'Salary Rules': { headers: ['Rule Type', 'Department', 'Rule Key', 'Value', 'Notes'] },
     'Holiday Calendar': { headers: ['Holiday Name', 'Occasion Date', 'Actual Holiday Date', 'Number of Days', 'Triple Pay', 'Status'] },
     'Latest Results': { title: 'Active Employees', headerRow: 2, headers: ['American Name', 'Department', 'Payroll Month', 'Cutoff', 'Basic EGP', 'ABS EGP', 'Commission EGP', 'Extra Days EGP', 'Probation EGP', 'Referral EGP', 'Deductions EGP', 'Total EGP', 'Notes', 'Warnings'] },

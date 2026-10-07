@@ -174,7 +174,8 @@ SalaryCalculator.MenuAndApi = (function () {
       var rows = readRows('Sources & Mappings');
       return SalaryCalculator.MappingConfig.parse(rows.slice(1).filter(function (row) { return String(row[0] || '').trim(); }).map(function (row) {
         return { department: row[0], spreadsheetId: row[1], leaveSpreadsheetId: row[2], employeeTab: row[3], attendanceTab: row[4],
-          employeeHeaderRow: row[5], attendanceHeaderRow: row[6], employeeColumns: row[7], attendanceColumns: row[8], approvalColumns: row[9] };
+          employeeHeaderRow: row[5], attendanceHeaderRow: row[6], employeeColumns: row[7], attendanceColumns: row[8], approvalColumns: row[9],
+          deductionSpreadsheetId: row[12], deductionTab: row[13], deductionHeaderRow: row[14], deductionColumns: row[15] };
       }));
     }
     function getRules() {
