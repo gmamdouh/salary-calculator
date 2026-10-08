@@ -99,6 +99,26 @@ test('draft retry repairs transient history failure but rejects a conflicting pa
   assert.throws(() => repository.createDraft(conflict), error => error.issues?.[0]?.code === 'RUN_ID_CONFLICT');
   assert.equal(gateway.list('Payroll History').length, 1);
 });
+
+test('OCR draft retry accepts regenerated evidence metadata but rejects changed decisions', () => {
+  const { repository, gateway } = harness();
+  const original = runRecord({ decisions: { ocr: { confirmedEmployeeIds: ['EMP-001'] } },
+    ocrAuditEvidence: [{ evidenceId: 'FIRST', url: 'https://example.test/first', timestamp: '2026-10-04T10:00:00Z' }] });
+  const append = gateway.appendUnique;
+  let failOnce = true;
+  gateway.appendUnique = function (...args) {
+    if (failOnce && args[0] === 'Payroll History') { failOnce = false; throw new Error('History unavailable'); }
+    return append.apply(this, args);
+  };
+  assert.throws(() => repository.createDraft(original), error => error.issues?.[0]?.code === 'DRAFT_PERSISTENCE_INCOMPLETE');
+  const retry = runRecord({ decisions: { ocr: { confirmedEmployeeIds: ['EMP-001'] } },
+    ocrAuditEvidence: [{ evidenceId: 'SECOND', url: 'https://example.test/second', timestamp: '2026-10-04T10:01:00Z' }] });
+  assert.equal(repository.createDraft(retry).ocrAuditEvidence[0].evidenceId, 'FIRST');
+  assert.equal(gateway.list('Payroll History').length, 1);
+  const changed = runRecord({ decisions: { ocr: { confirmedEmployeeIds: ['EMP-002'] } },
+    ocrAuditEvidence: retry.ocrAuditEvidence });
+  assert.throws(() => repository.createDraft(changed), error => error.issues?.[0]?.code === 'RUN_ID_CONFLICT');
+});
 test('overrides require a reason and persist calculated, previous and edited amounts with audit identity', () => {
   const { repository } = harness();
   repository.createDraft(runRecord());
@@ -393,6 +413,32 @@ test('interrupted latest publication resumes its checkpointed projection without
   assert.equal(events.filter(event => event[0] === 'source').length, sourceWrites);
   assert.equal(gateway.list('Payroll History').length, historyRows);
   assert.equal(gateway.list('Payment Ledger').length, benefitRows);
+});
+
+test('approved crash before latest checkpoint publishes results on retry without repeating payment writes', () => {
+  const { repository, gateway, events } = harness();
+  repository.createDraft(runRecord());
+  let failOnce = true;
+  gateway.projectRunAudit = run => {
+    if (failOnce && run.state === 'APPROVED' && !run.approvalCheckpoint.latestStatus) {
+      failOnce = false;
+      throw new Error('Audit projection failed after durable approval');
+    }
+  };
+  assert.throws(() => repository.approve('RUN-001', 'approver'), /Audit projection failed/);
+  assert.equal(repository.getRun('RUN-001').state, 'APPROVED');
+  assert.equal(repository.getRun('RUN-001').approvalCheckpoint.latestStatus, undefined);
+  assert.equal(gateway.list('Latest Results').length, 0);
+  const sourceWrites = events.filter(event => event[0] === 'source').length;
+  const historyRows = gateway.list('Payroll History').length;
+  const paymentRows = gateway.list('Payment Ledger').length;
+  const result = repository.approve('RUN-001', 'another-approver');
+  assert.equal(result.valid, true);
+  assert.equal(repository.getRun('RUN-001').approvalCheckpoint.latestStatus, 'COMPLETE');
+  assert.equal(gateway.read('Latest Results', 'EMP-001').runId, 'RUN-001');
+  assert.equal(events.filter(event => event[0] === 'source').length, sourceWrites);
+  assert.equal(gateway.list('Payroll History').length, historyRows);
+  assert.equal(gateway.list('Payment Ledger').length, paymentRows);
 });
 test('two approval calls through the document lock produce one durable approval write set', () => {
   const { repository, events } = harness();

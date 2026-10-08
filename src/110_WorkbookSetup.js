@@ -171,19 +171,21 @@ SalaryCalculator.WorkbookSetup = (function () {
       gateway.format(sheet, finalTitleRow + 2, 4, finalRows.length || 1, 1, 'dd-MM-yyyy');
     }
   }
-  function appendHistory(sheetMap, run) {
+  function appendHistory(sheetMap, run, historyKey) {
     if (!run || !Array.isArray(run.results)) throw new Error('Run results are required');
+    if (historyKey !== undefined && (typeof historyKey !== 'string' || !historyKey.trim())) throw new Error('History key is required');
     var sheet = sheetMap['Payroll History'];
     if (!sheet) throw new Error('Payroll History sheet is required');
     var gateway = masterGateway(), existing = sheet.getLastRow() > 1 ? sheet.getRange(2, 1, sheet.getLastRow() - 1, SHEETS['Payroll History'].headers.length).getValues() : [];
-    var state = run.state || 'DRAFT', snapshot = JSON.stringify(run), rows = [];
+    var state = run.state || 'DRAFT', key = historyKey || run.runId + ':' + run.version + ':' + state,
+      snapshot = JSON.stringify(run), rows = [];
     run.results.forEach(function (result) {
-      var duplicate = existing.some(function (row) { return row[0] === run.runId && row[1] === run.version && row[2] === state && row[3] === result.employeeId; });
+      var duplicate = existing.some(function (row) { return row[18] === key && row[3] === result.employeeId; });
       if (duplicate) return;
       var row = [run.runId, run.version, state, result.employeeId || '', americanName(run, result), result.department || '', run.payrollMonth || result.payrollMonth || '', dateValue(run.cutoff), result.finalSettlement === true];
       HISTORY_COMPONENTS.forEach(function (component) { row.push(amount(result, component)); });
       row.push(typeof result.total === 'number' ? result.total : SalaryCalculator.PayrollEngine.sumComponents(result.components || {}));
-      row.push(run.runId + ':' + run.version + ':' + state);
+      row.push(key);
       rows.push(row);
     });
     if (rows.length) {
@@ -195,9 +197,9 @@ SalaryCalculator.WorkbookSetup = (function () {
     }
     var runsSheet = sheetMap['Payroll Runs'];
     if (runsSheet) {
-      var savedRuns = runsSheet.getLastRow() > 1 ? runsSheet.getRange(2, 1, runsSheet.getLastRow() - 1, 3).getValues() : [];
-      var saved = savedRuns.some(function (row) { return row[0] === run.runId && row[1] === run.version && row[2] === state; });
-      if (!saved) gateway.writeRows(runsSheet, runsSheet.getLastRow() + 1, 1, [[run.runId, run.version, state, run.payrollMonth || '', dateValue(run.cutoff), snapshot]]);
+      var savedRuns = runsSheet.getLastRow() > 1 ? runsSheet.getRange(2, 1, runsSheet.getLastRow() - 1, 1).getValues() : [];
+      var saved = savedRuns.some(function (row) { return row[0] === key; });
+      if (!saved) gateway.writeRows(runsSheet, runsSheet.getLastRow() + 1, 1, [[key, run.version, state, run.payrollMonth || '', dateValue(run.cutoff), snapshot]]);
     }
     return rows.length;
   }

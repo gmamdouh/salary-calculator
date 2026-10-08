@@ -164,6 +164,30 @@ test('history preserves Employee IDs in protected audit data and appends one row
   assert.match(spreadsheet.getSheetByName('Payroll Runs').getRange(2, 6).getValues()[0][0], /Internal Name/);
 });
 
+test('history retains each immutable draft revision and its resolvable snapshot key', () => {
+  const { WorkbookSetup } = loadAppsScript();
+  const spreadsheet = fakeSpreadsheet(), sheets = WorkbookSetup.ensureManagedSheets(spreadsheet);
+  const run = runRecord({ state: 'DRAFT', revision: 1 });
+  assert.equal(WorkbookSetup.appendHistory(sheets, run, 'RUN-001:DRAFT:1'), 1);
+  run.revision = 2;
+  run.results[0].components.basic.amount = 16000;
+  run.results[0].total += 1000;
+  assert.equal(WorkbookSetup.appendHistory(sheets, run, 'RUN-001:DRAFT:2'), 1);
+  assert.equal(WorkbookSetup.appendHistory(sheets, run, 'RUN-001:DRAFT:2'), 0);
+  assert.equal(WorkbookSetup.appendHistory(sheets, run, 'RUN-001:APPROVAL_CHECKPOINT'), 1);
+  run.state = 'APPROVED';
+  assert.equal(WorkbookSetup.appendHistory(sheets, run, 'RUN-001:APPROVED'), 1);
+  const history = spreadsheet.getSheetByName('Payroll History');
+  assert.equal(history.getLastRow(), 5);
+  assert.deepEqual(history.getRange(2, 19, 4, 1).getValues().map(row => row[0]),
+    ['RUN-001:DRAFT:1', 'RUN-001:DRAFT:2', 'RUN-001:APPROVAL_CHECKPOINT', 'RUN-001:APPROVED']);
+  const snapshots = spreadsheet.getSheetByName('Payroll Runs');
+  assert.deepEqual(snapshots.getRange(2, 1, 4, 1).getValues().map(row => row[0]),
+    ['RUN-001:DRAFT:1', 'RUN-001:DRAFT:2', 'RUN-001:APPROVAL_CHECKPOINT', 'RUN-001:APPROVED']);
+  assert.equal(JSON.parse(snapshots.getRange(2, 6).getValues()[0][0]).revision, 1);
+  assert.equal(JSON.parse(snapshots.getRange(3, 6).getValues()[0][0]).revision, 2);
+});
+
 test('audit tabs project overrides and decisions from durable run state without duplicate retry rows', () => {
   const { WorkbookSetup } = loadAppsScript();
   const spreadsheet = fakeSpreadsheet(), sheets = WorkbookSetup.ensureManagedSheets(spreadsheet);

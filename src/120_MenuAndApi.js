@@ -209,6 +209,9 @@ SalaryCalculator.MenuAndApi = (function () {
       });
     }
     function runRows() { return readRows('Payroll Runs').slice(1); }
+    function currentRunRows() { return runRows().filter(function (row) {
+      return row[5] && row[0] === JSON.parse(row[5]).runId;
+    }); }
     function savedRun(id) {
       var rows = runRows();
       var row = rows.reverse().find(function (item) { return item[0] === id; });
@@ -232,7 +235,7 @@ SalaryCalculator.MenuAndApi = (function () {
         if (table === 'Payment Ledger') return paymentRows().find(function (item) { return item.benefitKey === key; }) || null;
         if (table === 'Latest Results') {
           var latest = null;
-          runRows().forEach(function (row) {
+          currentRunRows().forEach(function (row) {
             var run = row[5] && JSON.parse(row[5]);
             var result = run && run.state === 'APPROVED' && (run.results || []).find(function (item) { return item.employeeId === key; });
             var newer = result && (!latest || run.payrollMonth > latest.payrollMonth ||
@@ -271,14 +274,14 @@ SalaryCalculator.MenuAndApi = (function () {
         if (table === 'Payroll History') {
           sheet('Payroll History');
           sheet('Payroll Runs');
-          SalaryCalculator.WorkbookSetup.appendHistory(sheets, value);
+          SalaryCalculator.WorkbookSetup.appendHistory(sheets, value, key);
           return;
         }
         if (table === 'Payment Ledger' && !paymentRows().some(function (item) { return item.benefitKey === key; })) this.upsert(table, key, value);
       },
       list: function (table) {
         if (table === 'Payment Ledger') return paymentRows();
-        if (table === 'Payroll Runs') return runRows().filter(function (row) { return row[5]; }).map(function (row) { return JSON.parse(row[5]); });
+        if (table === 'Payroll Runs') return currentRunRows().map(function (row) { return JSON.parse(row[5]); });
         return [];
       }
     };

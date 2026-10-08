@@ -406,7 +406,7 @@ SalaryCalculator.RunRepository = (function () {
     }
     function comparableDraft(run) {
       var value = copy(run);
-      ['state', 'createdAt', 'revision', 'overrides', 'draftCheckpoint'].forEach(function (field) { delete value[field]; });
+      ['state', 'createdAt', 'revision', 'overrides', 'draftCheckpoint', 'ocrAuditEvidence'].forEach(function (field) { delete value[field]; });
       function stable(item) {
         if (Array.isArray(item)) return item.map(stable);
         if (!item || typeof item !== 'object') return item;
