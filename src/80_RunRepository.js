@@ -103,6 +103,21 @@ SalaryCalculator.RunRepository = (function () {
       });
       return rows;
     }
+    function settlementOwner(row) {
+      if (!row) return null;
+      if (typeof row.settlementRunId === 'string' && row.settlementRunId) return row.settlementRunId;
+      var match = String(row.notes || '').match(/(?:^|;\s*)settlementRunId=([^;]+)/);
+      return match ? match[1] : null;
+    }
+    function settledByRun(row, runId) {
+      return !!row && row.paid === true && settlementOwner(row) === runId;
+    }
+    function salesOwnershipConflict(row, key, run) {
+      var conflict = new Error('Sales accrual is already owned by another settlement run');
+      conflict.issues = [{ code: 'SALES_ACCRUAL_ALREADY_CLAIMED', benefitKey: key,
+        runId: run.runId, existingRunId: settlementOwner(row) || row.runId }];
+      return conflict;
+    }
     function assertBenefitOwnership(run) {
       var ledger = gateway.list(TABLES.benefits) || [];
       benefitRows(run).forEach(function (row) {
@@ -126,17 +141,26 @@ SalaryCalculator.RunRepository = (function () {
           occupied.issues = [{ code: 'SALES_ACCRUAL_ALREADY_CLAIMED', benefitKey: key, runId: run.runId, existingRunId: monthly.runId }];
           throw occupied;
         }
+        if (monthly && monthly.paid === true && !settledByRun(monthly, run.runId)) throw salesOwnershipConflict(monthly, key, run);
         if (!accrual.paid) return;
         var prior = accrual.priorMonthsPaid.map(function (month) { return ledger.find(function (row) {
           return row.benefitKey === 'SALES_ABS:' + result.employeeId + ':' + month;
         }); });
-        if (prior.some(function (row) { return !row || row.type !== 'SALES_ABS' || row.paid === true; })) throw new Error('Sales settlement is missing an unpaid prior accrual');
+        prior.forEach(function (row, index) {
+          if (!row || row.type !== 'SALES_ABS') throw new Error('Sales settlement is missing a prior accrual');
+          if (row.paid === true && !settledByRun(row, run.runId)) {
+            throw salesOwnershipConflict(row, 'SALES_ABS:' + result.employeeId + ':' + accrual.priorMonthsPaid[index], run);
+          }
+        });
         var expected = accrual.amount + prior.reduce(function (sum, row) { return sum + row.amount; }, 0);
         if (!result.components || !result.components.abs || result.components.abs.amount !== expected) {
           var ambiguous = new Error('Sales settlement total cannot be allocated to its monthly accruals');
           ambiguous.issues = [{ code: 'AMBIGUOUS_LEDGER_AMOUNT', employeeId: result.employeeId, runId: run.runId }];
           throw ambiguous;
         }
+        var settlementKey = 'SALES_ABS_SETTLEMENT:' + result.employeeId + ':' + accrual.payrollMonth;
+        var settlement = ledger.find(function (row) { return row.benefitKey === settlementKey; });
+        if (settlement && settlement.runId !== run.runId) throw salesOwnershipConflict(settlement, settlementKey, run);
       });
     }
     function appendBenefits(run) {
@@ -167,9 +191,8 @@ SalaryCalculator.RunRepository = (function () {
         var priorKeys = accrual.priorMonthsPaid.map(function (month) { return 'SALES_ABS:' + result.employeeId + ':' + month; });
         var ledger = gateway.list(TABLES.benefits) || [], settlementRows = priorKeys.map(function (priorKey) {
           var row = ledger.find(function (item) { return item.benefitKey === priorKey; });
-          if (!row || row.type !== 'SALES_ABS' || row.employeeId !== result.employeeId || row.paid === true) {
-            throw new Error('Sales settlement is missing an unpaid prior accrual');
-          }
+          if (!row || row.type !== 'SALES_ABS' || row.employeeId !== result.employeeId) throw new Error('Sales settlement is missing a prior accrual');
+          if (row.paid === true && !settledByRun(row, run.runId)) throw salesOwnershipConflict(row, priorKey, run);
           return row;
         });
         var settlementAmount = accrual.amount + settlementRows.reduce(function (sum, row) { return sum + row.amount; }, 0);
@@ -190,6 +213,25 @@ SalaryCalculator.RunRepository = (function () {
           payrollMonth: accrual.payrollMonth, runId: run.runId, paid: true, paymentDate: run.approvalCheckpoint.approvedAt,
           decision: 'SETTLED', eligibility: 'APPROVED', notes: 'Approved by ' + run.approvalCheckpoint.approvedBy });
       });
+    }
+    function finalizeBenefits(run) {
+      var checkpoint = run.approvalCheckpoint;
+      if (!checkpoint || checkpoint.benefitsFinalized === true) return;
+      benefitRows(run).forEach(function (row) {
+        var existing = gateway.read(TABLES.benefits, row.benefitKey);
+        if (existing && existing.runId !== run.runId) {
+          var conflict = new Error('One-time benefit is already claimed by another approved run');
+          conflict.issues = [{ code: 'BENEFIT_ALREADY_CLAIMED', benefitKey: row.benefitKey,
+            runId: run.runId, existingRunId: existing.runId }];
+          throw conflict;
+        }
+        gateway.upsert(TABLES.benefits, row.benefitKey, Object.assign({}, existing || row, {
+          paid: true, paymentDate: checkpoint.approvedAt, decision: 'PAID', eligibility: 'APPROVED',
+          notes: 'Paid by ' + checkpoint.approvedBy
+        }));
+      });
+      checkpoint.benefitsFinalized = true;
+      gateway.upsert(TABLES.runs, run.runId, run);
     }
     function approvalResult(run) {
       return copy(run.approvalCheckpoint.result || { valid: true, state: 'APPROVED', runId: run.runId,
@@ -252,10 +294,11 @@ SalaryCalculator.RunRepository = (function () {
       return locked(function () {
         var run = getRun(runId);
         assertDraftComplete(run);
-        if (run.state === 'DRAFT' && !run.approvalCheckpoint) assertBenefitOwnership(run);
+        if (run.state === 'DRAFT') assertBenefitOwnership(run);
         if (run.state === 'SUPERSEDED') return approvalResult(run);
         if (run.state === 'APPROVED' && run.writeBackStatus === 'COMPLETE') {
-          if (run.approvalCheckpoint && run.approvalCheckpoint.latestStatus === 'PENDING') publishLatest(run);
+          finalizeBenefits(run);
+          if (run.approvalCheckpoint && run.approvalCheckpoint.latestStatus !== 'COMPLETE') publishLatest(run);
           return approvalResult(run);
         }
         if (run.state === 'APPROVED') {
@@ -268,6 +311,7 @@ SalaryCalculator.RunRepository = (function () {
           run.approvalCheckpoint.result = { valid: true, state: 'APPROVED', runId: runId,
             approvedBy: run.approvedBy, approvedAt: run.approvedAt, writeBackStatus: 'COMPLETE' };
           gateway.upsert(TABLES.runs, runId, run);
+          finalizeBenefits(run);
           return approvalResult(run);
         }
         if (run.state !== 'DRAFT') throw new Error('Only a draft can be approved');
@@ -306,6 +350,7 @@ SalaryCalculator.RunRepository = (function () {
           approvedBy: run.approvedBy, approvedAt: run.approvedAt, writeBackStatus: 'COMPLETE' };
         gateway.appendUnique(TABLES.history, runId + ':APPROVED', run);
         gateway.upsert(TABLES.runs, runId, run);
+        finalizeBenefits(run);
         publishLatest(run);
         return approvalResult(run);
       });

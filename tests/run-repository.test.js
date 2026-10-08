@@ -140,6 +140,41 @@ test('approval is immutable and retry returns the same approval without duplicat
   assert.ok(events.findIndex(event => event[0] === 'append' && event[1] === 'Payment Ledger') < sourceIndex);
   assert.equal(isLocked(), false);
 });
+test('completed approval finalizes probation and referral ledger rows idempotently after a partial payment write', () => {
+  const { repository, gateway } = harness();
+  const result = runRecord().results[0];
+  result.benefitCandidates.push({ eligible: true, amount: 5000, benefitKey: 'REFERRAL:EMP-001:EMP-002' });
+  result.components.referral = { calculatedAmount: 5000, amount: 5000 };
+  result.total += 5000;
+  repository.createDraft(runRecord({ results: [result] }));
+  const upsert = gateway.upsert;
+  let failAfterDurablePayment = true;
+  gateway.upsert = function (table, key, value) {
+    const saved = upsert.apply(this, arguments);
+    if (failAfterDurablePayment && table === 'Payment Ledger' && value.paid === true) {
+      failAfterDurablePayment = false;
+      throw new Error('Failure after first paid row was durable');
+    }
+    return saved;
+  };
+  assert.throws(() => repository.approve('RUN-001', 'approver'), /first paid row/);
+  gateway.upsert = upsert;
+  assert.equal(gateway.read('Payment Ledger', 'PROBATION:EMP-001').paid, true);
+  assert.equal(gateway.read('Payment Ledger', 'REFERRAL:EMP-001:EMP-002').paid, false);
+
+  assert.equal(repository.approve('RUN-001', 'retry-approver').valid, true);
+  const probation = gateway.read('Payment Ledger', 'PROBATION:EMP-001');
+  const referral = gateway.read('Payment Ledger', 'REFERRAL:EMP-001:EMP-002');
+  for (const row of [probation, referral]) {
+    assert.equal(row.paid, true);
+    assert.equal(row.paymentDate, '2026-10-04T10:00:00.000Z');
+    assert.equal(row.decision, 'PAID');
+    assert.equal(row.eligibility, 'APPROVED');
+    assert.equal(row.notes, 'Paid by approver');
+  }
+  assert.equal(gateway.list('Payment Ledger').length, 2);
+  assert.equal(repository.getRun('RUN-001').approvalCheckpoint.benefitsFinalized, true);
+});
 test('one-time benefit ownership is claimed by the first approved draft and conflicts have no side effects', () => {
   const { repository, gateway, events } = harness();
   repository.createDraft(runRecord());
@@ -159,10 +194,35 @@ test('one-time benefit ownership is claimed by the first approved draft and conf
   const benefitRow = gateway.read('Payment Ledger', 'PROBATION:EMP-001');
   assert.equal(benefitRow.amount, 9000);
   assert.equal(benefitRow.runId, 'RUN-001');
+  assert.equal(benefitRow.paid, true);
   assert.equal(benefitRow.paymentDate, '2026-10-04T10:00:00.000Z');
-  assert.equal(benefitRow.decision, 'APPROVED');
+  assert.equal(benefitRow.decision, 'PAID');
   assert.equal(benefitRow.eligibility, 'APPROVED');
-  assert.equal(benefitRow.notes, 'Approved by approver-one');
+  assert.equal(benefitRow.notes, 'Paid by approver-one');
+});
+test('approval retry rechecks benefit ownership after a checkpointed ledger write failure', () => {
+  const { repository, gateway } = harness();
+  const firstRun = runRecord();
+  repository.createDraft(firstRun);
+  let failBeforeWrite = true;
+  const appendUnique = gateway.appendUnique;
+  gateway.appendUnique = function (table, key, value) {
+    if (failBeforeWrite && table === 'Payment Ledger') {
+      failBeforeWrite = false;
+      throw new Error('Ledger unavailable before first durable append');
+    }
+    return appendUnique.apply(this, arguments);
+  };
+  assert.throws(() => repository.approve(firstRun.runId, 'approver-a'), /Ledger unavailable/);
+  gateway.appendUnique = appendUnique;
+  assert.equal(repository.getRun(firstRun.runId).approvalCheckpoint.benefitsWritten, undefined);
+
+  repository.createDraft(runRecord({ runId: 'RUN-B', version: 2 }));
+  repository.approve('RUN-B', 'approver-b');
+  assert.throws(() => repository.approve(firstRun.runId, 'approver-a'), error =>
+    error.issues?.[0]?.code === 'BENEFIT_ALREADY_CLAIMED' && error.issues[0].existingRunId === 'RUN-B');
+  assert.equal(repository.getRun(firstRun.runId).state, 'DRAFT');
+  assert.equal(gateway.read('Payment Ledger', 'PROBATION:EMP-001').runId, 'RUN-B');
 });
 test('sales accrual months settle once with the approved cumulative amount and approval metadata', () => {
   const { repository, gateway } = harness();
@@ -193,6 +253,44 @@ test('sales accrual months settle once with the approved cumulative amount and a
   assert.equal(settlement.paymentDate, '2026-10-04T10:00:00.000Z');
   assert.equal(settlement.eligibility, 'APPROVED');
   assert.equal(settlement.decision, 'SETTLED');
+  assert.equal(rows.filter(row => row.type === 'SALES_ABS_SETTLEMENT').length, 1);
+});
+test('interrupted Sales settlement resumes rows already settled by its run and blocks other runs', () => {
+  const { repository, gateway } = harness();
+  const salesRun = (runId, payrollMonth, amount, paid, priorMonthsPaid = [], absAmount = amount) => runRecord({ runId, payrollMonth,
+    results: [{ employeeId: 'EMP-SALES', department: 'SALES', payrollMonth,
+      components: { basic: { calculatedAmount: 16000, amount: 16000 }, abs: { calculatedAmount: absAmount, amount: paid ? absAmount : 0 },
+        probation: { calculatedAmount: 0, amount: 0 }, referral: { calculatedAmount: 0, amount: 0 } },
+      total: 16000 + (paid ? absAmount : 0), benefitCandidates: [],
+      salesAccrual: { payrollMonth, amount, paid, priorMonthsPaid } }] });
+  repository.createDraft(salesRun('RUN-JUL', '2026-07', 3000, false));
+  repository.approve('RUN-JUL', 'approver');
+  repository.createDraft(salesRun('RUN-AUG', '2026-08', 4000, false));
+  repository.approve('RUN-AUG', 'approver');
+  repository.createDraft(salesRun('RUN-SEP', '2026-09', 5000, true, ['2026-07', '2026-08'], 12000));
+  const upsert = gateway.upsert;
+  let failAfterJulySettlement = true;
+  gateway.upsert = function (table, key, value) {
+    const result = upsert.apply(this, arguments);
+    if (failAfterJulySettlement && table === 'Payment Ledger' && key === 'SALES_ABS:EMP-SALES:2026-07' && value.paid === true) {
+      failAfterJulySettlement = false;
+      throw new Error('Failure after July settlement was durable');
+    }
+    return result;
+  };
+  assert.throws(() => repository.approve('RUN-SEP', 'settlement-approver'), /Failure after July/);
+  gateway.upsert = upsert;
+  assert.equal(gateway.read('Payment Ledger', 'SALES_ABS:EMP-SALES:2026-07').paid, true);
+
+  repository.createDraft(salesRun('RUN-OCT', '2026-10', 0, true, ['2026-07', '2026-08', '2026-09'], 12000));
+  assert.throws(() => repository.approve('RUN-OCT', 'other-approver'), error =>
+    error.issues?.[0]?.code === 'SALES_ACCRUAL_ALREADY_CLAIMED' && error.issues[0].existingRunId === 'RUN-SEP');
+
+  assert.equal(repository.approve('RUN-SEP', 'retry-approver').valid, true);
+  const rows = gateway.list('Payment Ledger');
+  assert.equal(rows.find(row => row.benefitKey === 'SALES_ABS:EMP-SALES:2026-07').paid, true);
+  assert.equal(rows.find(row => row.benefitKey === 'SALES_ABS:EMP-SALES:2026-08').paid, true);
+  assert.equal(rows.find(row => row.benefitKey === 'SALES_ABS:EMP-SALES:2026-09').paid, true);
   assert.equal(rows.filter(row => row.type === 'SALES_ABS_SETTLEMENT').length, 1);
 });
 test('approval rejects referral aggregate overrides that cannot be allocated without partial writes', () => {
