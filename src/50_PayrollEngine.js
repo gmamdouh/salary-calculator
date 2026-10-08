@@ -88,11 +88,11 @@ SalaryCalculator.PayrollEngine = (function () {
     }
     add('commission', commission, detail);
     var benefitLedger = ledger.filter(function (row) { return row.benefitKey; }).slice();
-    function benefit(result) {
+    function benefit(result, allowOutsideWindow) {
       notes.push(result.note);
       if (result.candidate || result.eligible) candidates.push(result);
       if (result.decisionRequired) warnings.push(result.note);
-      if (!result.eligible || !window) return 0;
+      if (!result.eligible || (!window && !allowOutsideWindow)) return 0;
       benefitLedger.push({ benefitKey: result.benefitKey });
       return result.amount;
     }
@@ -101,8 +101,13 @@ SalaryCalculator.PayrollEngine = (function () {
       Object.assign({}, decisions.probation || {}, { asOfDate: period.endDate }));
     add('probation', benefit(eligibility.probation));
     var referrals = 0;
+    var finalPaymentInPeriod = !!(employee.lastWorkingDay && employee.finalPayrollPaymentDate &&
+      employee.finalPayrollPaymentDate >= period.startDate && employee.finalPayrollPaymentDate <= period.endDate);
+    var referralPayable = !employee.lastWorkingDay || !employee.finalPayrollPaymentDate || finalPaymentInPeriod;
     (decisions.referrals || []).forEach(function (referred) {
-      referrals += benefit(Eligibility.evaluateReferral(employee, referred, decisions.paymentDate || period.endDate, benefitLedger));
+      if (!referralPayable) return;
+      var evaluated = Eligibility.evaluateReferral(employee, referred, decisions.paymentDate || period.endDate, benefitLedger);
+      referrals += benefit(evaluated, finalPaymentInPeriod);
     });
     add('referral', referrals);
     var extra = Eligibility.calculateExtraDayUnits(attendance.workedOffDays || [], attendance.workedHolidays || []);
@@ -144,6 +149,7 @@ SalaryCalculator.PayrollEngine = (function () {
     });
     return { employeeId: employee.employeeId, americanName: employee.americanName, department: employee.department,
       payrollMonth: period.payrollMonth, finalSettlement: finalSettlement, window: window, segments: segments,
+      attendance: { noShowDate: attendance.noShowDate || null, noShowDates: (attendance.noShowDates || []).slice() },
       components: components, total: sumComponents(components), notes: notes, benefitCandidates: candidates,
       warnings: warnings, eligibility: eligibility, salesAccrual: salesAccrual };
   }

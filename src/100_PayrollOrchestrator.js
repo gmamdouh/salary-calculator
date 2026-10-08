@@ -122,6 +122,16 @@ SalaryCalculator.PayrollOrchestrator = (function () {
             attendance.forEach(function (record) {
               if (!ids[record.employeeId]) throw Object.assign(new Error('Attendance Employee ID is absent from employee source'), { issues: [issue('UNMATCHED_EMPLOYEE_ID', 'Attendance Employee ID is absent from employee source.', department, { employeeId: record.employeeId })] });
             });
+            var missingAttendance = deptEmployees.filter(function (employee) {
+              var window = SalaryCalculator.PayrollPeriod.getEmploymentWindow(employee, period);
+              return window && !attendance.some(function (record) {
+                return record.employeeId === employee.employeeId && record.date >= window.startDate && record.date <= window.endDate;
+              });
+            }).map(function (employee) {
+              return issue('MISSING_ATTENDANCE', 'No attendance or schedule evidence exists for this employed employee in the payroll period.',
+                department, { employeeId: employee.employeeId });
+            });
+            if (missingAttendance.length) throw Object.assign(new Error('Missing attendance evidence'), { issues: missingAttendance });
             attendanceByDepartment[department] = attendance;
             if (config.deductionSpreadsheetId) {
               access = sourceGateway.validateAccess(config, 'deduction');
@@ -174,6 +184,54 @@ SalaryCalculator.PayrollOrchestrator = (function () {
           });
         });
 
+        // Referral relationships are roster facts, not client decisions. A scoped payroll still
+        // needs the other departments' employee rosters, but never their attendance or performance.
+        var referralInputs = inputs.slice(), referralSourceSnapshot = {}, referralUnavailable = false;
+        if (inputs.length) configs.forEach(function (rawConfig) {
+          var sourceDepartment = String(rawConfig.department || '').trim().toUpperCase();
+          if (unique.indexOf(sourceDepartment) !== -1) return;
+          try {
+            var referralConfig = SalaryCalculator.MappingConfig.parse([rawConfig])[0];
+            var identityColumns = {};
+            ['employeeId', 'americanName', 'firstWorkingDay', 'lastWorkingDay', 'finalPayrollPaymentDate', 'referrerEmployeeId'].forEach(function (field) {
+              if (referralConfig.employeeColumns[field]) identityColumns[field] = referralConfig.employeeColumns[field];
+            });
+            var identityMapping = Object.assign({}, referralConfig, { employeeColumns: identityColumns });
+            var access = sourceGateway.validateAccess(identityMapping, 'employee');
+            if (!access || access.valid !== true) throw Object.assign(new Error('Employee roster access failed'), { issues: access && access.errors || [] });
+            var rosterRows = typeof sourceGateway.readEmployeeRoster === 'function' ?
+              sourceGateway.readEmployeeRoster(identityMapping, period) : sourceGateway.readDepartment(identityMapping, period).employeeRows;
+            referralInputs = referralInputs.concat(rosterRows.map(function (row) {
+              return SalaryCalculator.MappingConfig.normalizeEmployee(row, identityMapping);
+            }));
+            referralSourceSnapshot[sourceDepartment] = { employeeRows: copy(rosterRows),
+              source: { spreadsheetId: referralConfig.spreadsheetId, employeeTab: referralConfig.employeeTab } };
+          } catch (error) {
+            referralUnavailable = true;
+            inputs.forEach(function (employee) {
+              errors.push(issue('REFERRAL_SOURCE_UNAVAILABLE', 'The referral directory cannot be verified from another department roster.',
+                employee.department, { employeeId: employee.employeeId, sourceDepartment: sourceDepartment,
+                  sourceIssues: error.issues || [], cause: error.message }));
+            });
+          }
+        });
+        var selectedById = Object.create(null), directoryById = Object.create(null);
+        inputs.forEach(function (employee) { selectedById[employee.employeeId] = employee; });
+        referralInputs.forEach(function (employee) {
+          (directoryById[employee.employeeId] || (directoryById[employee.employeeId] = [])).push(employee);
+        });
+        Object.keys(directoryById).forEach(function (employeeId) {
+          var entries = directoryById[employeeId];
+          if (entries.length < 2) return;
+          entries.forEach(function (entry) {
+            var referrer = selectedById[entry.referrerEmployeeId];
+            if (!referrer) return;
+            referralUnavailable = true;
+            errors.push(issue('REFERRAL_EMPLOYEE_ID_COLLISION', 'A referred Employee ID is duplicated in the referral directory.',
+              referrer.department, { employeeId: referrer.employeeId, referredEmployeeId: employeeId }));
+          });
+        });
+
         var decisionRequirements = [], benefitLedger = dependencies.getBenefitLedger ? dependencies.getBenefitLedger() : [];
         inputs.forEach(function (employee) {
           var employeeDecisions = request.decisions && request.decisions.employeeDecisions &&
@@ -182,15 +240,16 @@ SalaryCalculator.PayrollOrchestrator = (function () {
           var probation = SalaryCalculator.Eligibility.evaluateProbationPayment(employee,
             benefitLedger.filter(function (row) { return row.benefitKey; }),
             { asOfDate: period.endDate, approved: typeof probationDecision.approved === 'boolean' ? probationDecision.approved : undefined });
-          if (probation.decisionRequired) decisionRequirements.push({ employeeId: employee.employeeId,
+          if (probation.decisionRequired && SalaryCalculator.PayrollPeriod.getEmploymentWindow(employee, period)) decisionRequirements.push({ employeeId: employee.employeeId,
             americanName: employee.americanName, department: employee.department, decision: 'PROBATION',
             candidateDate: probation.candidateDate, message: probation.note });
         });
         var allMode = request.departmentScope.indexOf('ALL') !== -1;
         var failedDepartments = unique.filter(function (department) { return failed[department]; });
-        return { valid: errors.length === 0 || (allMode && inputs.length > 0), errors: errors, warnings: warnings, payrollMonth: request.payrollMonth,
+        return { valid: !referralUnavailable && (errors.length === 0 || (allMode && inputs.length > 0)), errors: errors, warnings: warnings, payrollMonth: request.payrollMonth,
           cutoffMode: request.cutoffMode, departmentScope: unique, period: period, employees: employees, inputs: inputs,
           attendanceByEmployee: attendanceByEmployee, deductionsByEmployee: deductionsByEmployee, sourceSnapshot: sourceSnapshot, sourceConfigs: sourceConfigs,
+          referralInputs: referralInputs, referralSourceSnapshot: referralSourceSnapshot,
           failedDepartments: failedDepartments, departmentErrors: errors,
           partialDepartmentsFingerprint: partialDepartmentsFingerprint(failedDepartments, errors), runId: runId(), decisions: copy(request.decisions || {}),
           decisionRequirements: decisionRequirements, unresolvedDecisionCount: decisionRequirements.length };
@@ -227,44 +286,78 @@ SalaryCalculator.PayrollOrchestrator = (function () {
         errors: [issue('OCR_UNRESOLVED', 'Resolve all ambiguous, unmatched, and unconfirmed OCR entries before drafting.')], warnings: [] };
       var rules = dependencies.getRules ? dependencies.getRules() : {};
       var ledger = dependencies.getBenefitLedger ? dependencies.getBenefitLedger() : [];
-      var holidayWork = decisions.holidayWork || {}, selectedHolidayIds = (holidayWork.employeeIds || []).map(String);
-      var selectedHoliday = null, holidayDates = [];
-      if (holidayWork.applies === true) {
-        var calendar = dependencies.getHolidayCalendar ? dependencies.getHolidayCalendar() : [];
-        selectedHoliday = (calendar || []).find(function (holiday) {
+      var referralsByReferrer = Object.create(null), referralKeys = Object.create(null);
+      var rosterById = Object.create(null);
+      report.referralInputs.forEach(function (employee) { rosterById[employee.employeeId] = employee; });
+      report.referralInputs.forEach(function (referred) {
+        var referrerId = referred.referrerEmployeeId, referrer = rosterById[referrerId];
+        if (!referrer || referrer.employeeId === referred.employeeId) return;
+        var key = 'REFERRAL:' + referrerId + ':' + referred.employeeId;
+        if (referralKeys[key]) return;
+        referralKeys[key] = true;
+        (referralsByReferrer[referrerId] || (referralsByReferrer[referrerId] = [])).push(referred);
+      });
+      var holidayWork = decisions.holidayWork || {}, holidaySelections = Object.create(null);
+      var holidayDecisions = Array.isArray(holidayWork.dates) ? holidayWork.dates.slice() : [];
+      var calendar = dependencies.getHolidayCalendar ? dependencies.getHolidayCalendar() : [];
+      if (!holidayDecisions.length && holidayWork.applies === true) {
+        var legacyHoliday = (calendar || []).find(function (holiday) {
           return String(holiday.holidayId || holiday.id || '') === String(holidayWork.holidayId || '');
         });
-        if (!selectedHoliday) return { valid: false, state: 'BLOCKED', runId: report.runId,
+        if (!legacyHoliday) return { valid: false, state: 'BLOCKED', runId: report.runId,
           errors: [issue('HOLIDAY_REQUIRED', 'Choose a configured holiday before confirming holiday work.')], warnings: [] };
-        holidayDates = selectedHoliday.actualHolidayDates || [];
-        if (!Array.isArray(holidayDates) || !holidayDates.length || holidayDates.some(function (date) {
-          return !/^\d{4}-\d{2}-\d{2}$/.test(date) || date < report.period.startDate || date > report.period.endDate;
-        })) return { valid: false, state: 'BLOCKED', runId: report.runId,
-          errors: [issue('HOLIDAY_DATE_INVALID', 'The selected holiday has no valid actual dates inside this payroll period.')], warnings: [] };
-        var validatedIds = Object.create(null);
-        report.employees.forEach(function (employee) { validatedIds[employee.employeeId] = true; });
-        if (selectedHolidayIds.some(function (employeeId) { return !validatedIds[employeeId]; })) {
+        if (!Array.isArray(legacyHoliday.actualHolidayDates) || legacyHoliday.actualHolidayDates.length !== 1)
+          return { valid: false, state: 'BLOCKED', runId: report.runId,
+            errors: [issue('HOLIDAY_DATE_AMBIGUOUS', 'Select employees separately for each actual holiday date.')], warnings: [] };
+        holidayDecisions.push({ holidayId: holidayWork.holidayId, date: legacyHoliday.actualHolidayDates[0],
+          applies: true, employeeIds: holidayWork.employeeIds || [] });
+        decisions.holidayWork.actualHolidayDates = legacyHoliday.actualHolidayDates.slice();
+      }
+      var validatedIds = Object.create(null), seenHolidayDates = Object.create(null);
+      report.employees.forEach(function (employee) { validatedIds[employee.employeeId] = true; });
+      for (var holidayIndex = 0; holidayIndex < holidayDecisions.length; holidayIndex++) {
+        var holidayDecision = holidayDecisions[holidayIndex], holiday = (calendar || []).find(function (item) {
+          return String(item.holidayId || item.id || '') === String(holidayDecision.holidayId || '');
+        });
+        if (!holiday) return { valid: false, state: 'BLOCKED', runId: report.runId,
+          errors: [issue('HOLIDAY_REQUIRED', 'Choose a configured holiday before confirming holiday work.')], warnings: [] };
+        var selectedDate = holidayDecision.date;
+        if (!Array.isArray(holiday.actualHolidayDates) || holiday.actualHolidayDates.indexOf(selectedDate) === -1 ||
+            !/^\d{4}-\d{2}-\d{2}$/.test(selectedDate || '') || selectedDate < report.period.startDate || selectedDate > report.period.endDate ||
+            seenHolidayDates[selectedDate]) return { valid: false, state: 'BLOCKED', runId: report.runId,
+          errors: [issue('HOLIDAY_DATE_INVALID', 'Choose one configured actual holiday date per decision inside this payroll period.')], warnings: [] };
+        seenHolidayDates[selectedDate] = true;
+        if (holidayDecision.applies !== true) continue;
+        var employeeIds = holidayDecision.employeeIds || [];
+        if (!Array.isArray(employeeIds) || employeeIds.some(function (employeeId) { return !validatedIds[String(employeeId)]; }))
           return { valid: false, state: 'BLOCKED', runId: report.runId,
             errors: [issue('HOLIDAY_EMPLOYEE_INVALID', 'Holiday work includes an employee outside the validated run.')], warnings: [] };
-        }
-        decisions.holidayWork.actualHolidayDates = holidayDates.slice();
+        employeeIds.forEach(function (employeeId) {
+          (holidaySelections[String(employeeId)] || (holidaySelections[String(employeeId)] = [])).push(selectedDate);
+        });
       }
       var results = [], calculationErrors = [];
       report.inputs.forEach(function (employee) {
         try {
-          var entries = report.attendanceByEmployee[employee.employeeId] || [];
-          var attendance = { attendedScheduledDays: 0, leaveDays: 0, nsPresent: false, workedOffDays: [], workedHolidays: [] };
+          var employmentWindow = SalaryCalculator.PayrollPeriod.getEmploymentWindow(employee, report.period);
+          var entries = (report.attendanceByEmployee[employee.employeeId] || []).filter(function (entry) {
+            return employmentWindow && entry.date >= employmentWindow.startDate && entry.date <= employmentWindow.endDate;
+          });
+          var attendance = { attendedScheduledDays: 0, leaveDays: 0, nsPresent: false, noShowDates: [], workedOffDays: [], workedHolidays: [] };
           entries.forEach(function (entry) {
             if (entry.status === 'PRESENT') attendance.attendedScheduledDays++;
             if (entry.status === 'LEAVE') attendance.leaveDays++;
-            if (entry.status === 'NS') attendance.nsPresent = true;
+            if (entry.status === 'NS') { attendance.nsPresent = true; attendance.noShowDates.push(entry.date); }
             if (entry.status === 'OFF') attendance.workedOffDays.push(entry.date);
-            if (entry.status === 'HOLIDAY') attendance.workedHolidays.push(entry.date);
           });
-          if (holidayWork.applies === true && selectedHolidayIds.indexOf(employee.employeeId) !== -1) {
-            holidayDates.forEach(function (date) { if (attendance.workedHolidays.indexOf(date) === -1) attendance.workedHolidays.push(date); });
-          }
+          attendance.noShowDates.sort();
+          attendance.noShowDate = attendance.noShowDates[0] || null;
+          attendance.workedHolidays = (holidaySelections[employee.employeeId] || []).slice();
           var employeeDecisions = decisions.employeeDecisions && decisions.employeeDecisions[employee.employeeId] || decisions[employee.employeeId] || {};
+          if (!decisions.employeeDecisions[employee.employeeId]) decisions.employeeDecisions[employee.employeeId] = employeeDecisions;
+          employeeDecisions.referrals = (referralsByReferrer[employee.employeeId] || []).slice();
+          employeeDecisions.paymentDate = employee.lastWorkingDay && employee.finalPayrollPaymentDate ?
+            employee.finalPayrollPaymentDate : report.period.endDate;
           results.push(SalaryCalculator.PayrollEngine.calculateEmployee({ employee: employee, rules: rules, attendance: attendance,
             period: report.period, ledger: ledger, decisions: employeeDecisions }));
         } catch (error) {
@@ -293,7 +386,7 @@ SalaryCalculator.PayrollOrchestrator = (function () {
       var run = { runId: id, version: 1, state: 'DRAFT', payrollMonth: report.payrollMonth, cutoff: report.period.endDate,
         cutoffMode: report.cutoffMode, departmentScope: report.departmentScope, rulesVersion: dependencies.rulesVersion || 'unknown',
         createdBy: actor(), createdAt: timestamp, sourceSnapshot: report.sourceSnapshot, sourceConfigs: report.sourceConfigs,
-        inputs: report.inputs, decisions: decisions, ocrAuditEvidence: auditEvidence, results: results,
+        inputs: report.inputs, referralSourceSnapshot: report.referralSourceSnapshot, decisions: decisions, ocrAuditEvidence: auditEvidence, results: results,
         failedDepartments: report.failedDepartments || [], departmentErrors: report.departmentErrors || report.errors || [],
         partialDepartmentsFingerprint: report.partialDepartmentsFingerprint || null,
         warnings: report.warnings, acknowledgements: persistedAcknowledgements };

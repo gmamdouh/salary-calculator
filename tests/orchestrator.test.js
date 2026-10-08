@@ -47,6 +47,7 @@ function fixture(options = {}) {
       } })),
       rulesVersion: 'rules-v1', clock: () => '2026-10-04T10:00:00.000Z', actor: () => 'hr@example.test',
       buildPeriod: () => period, readDecisions: () => ({}), auditStore: options.auditStore,
+      getBenefitLedger: options.getBenefitLedger,
       getHolidayCalendar: () => options.holidays || []
     }) };
 }
@@ -301,6 +302,175 @@ test('confirmed holiday work applies its calendar dates only to selected Employe
   assert.equal(run.valid, true);
   assert.equal(run.results[0].components.extraDays.byDate[0].date, '2026-09-14');
   assert.equal(run.results[0].components.extraDays.byDate[0].units, 2);
+});
+
+test('HOLIDAY attendance without an affirmative dated HR decision pays no holiday units', () => {
+  const { orchestrator } = fixture({ holidays: [{ holidayId: 'H-1', actualHolidayDates: ['2026-09-14'] }],
+    readDepartment(config, period, employee, attendance) {
+      return { department: config.department, period, employeeRows: [employee], attendanceRows: [
+        { ...attendance, values: ['EMP-001', '2026-09-14', 'HOLIDAY'] }
+      ] };
+    } });
+  const request = { payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['SURVEY'] };
+  const undecided = orchestrator.calculateDraft(request);
+  assert.equal(undecided.valid, true);
+  assert.equal(undecided.results[0].components.extraDays.units, 0);
+  const declined = orchestrator.calculateDraft({ ...request,
+    decisions: { holidayWork: { holidayId: 'H-1', applies: false, employeeIds: ['EMP-001'] } } });
+  assert.equal(declined.valid, true);
+  assert.equal(declined.results[0].components.extraDays.units, 0);
+});
+
+test('separate holiday decisions select different employees by exact calendar date', () => {
+  const employeeB = { headers: ['ID', 'Name', 'Joined', 'Transfers'],
+    values: ['EMP-002', 'Blair', '2026-08-01', 0], rowNumber: 3 };
+  const { orchestrator } = fixture({ holidays: [
+    { holidayId: 'H-1', actualHolidayDates: ['2026-09-14'] },
+    { holidayId: 'H-2', actualHolidayDates: ['2026-09-21'] }
+  ], readDepartment(config, period, employee, attendance) {
+    return { department: config.department, period, employeeRows: [employee, employeeB], attendanceRows: [
+      attendance, { ...attendance, values: ['EMP-002', '2026-09-01', 'PRESENT'] }
+    ] };
+  } });
+  const run = orchestrator.calculateDraft({ payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['SURVEY'],
+    decisions: { holidayWork: { dates: [
+      { holidayId: 'H-1', date: '2026-09-14', applies: true, employeeIds: ['EMP-001'] },
+      { holidayId: 'H-2', date: '2026-09-21', applies: true, employeeIds: ['EMP-002'] }
+    ] } } });
+  assert.equal(run.valid, true, JSON.stringify(plain(run)));
+  assert.deepEqual(plain(run.results.map(result => result.components.extraDays.byDate)), [
+    [{ date: '2026-09-14', units: 2 }], [{ date: '2026-09-21', units: 2 }]
+  ]);
+});
+
+test('approved holiday overlapping an OFF record pays two total units, not three', () => {
+  const { orchestrator } = fixture({ holidays: [{ holidayId: 'H-1', actualHolidayDates: ['2026-09-14'] }],
+    readDepartment(config, period, employee, attendance) {
+      return { department: config.department, period, employeeRows: [employee], attendanceRows: [
+        { ...attendance, values: ['EMP-001', '2026-09-14', 'OFF'] }
+      ] };
+    } });
+  const run = orchestrator.calculateDraft({ payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['SURVEY'],
+    decisions: { holidayWork: { holidayId: 'H-1', applies: true, employeeIds: ['EMP-001'] } } });
+  assert.equal(run.valid, true);
+  assert.deepEqual(plain(run.results[0].components.extraDays.byDate), [{ date: '2026-09-14', units: 2 }]);
+});
+
+test('legacy holiday selection cannot silently approve a multi-date calendar entry', () => {
+  const { orchestrator } = fixture({ holidays: [{ holidayId: 'H-1', actualHolidayDates: ['2026-09-14', '2026-09-15'] }] });
+  const run = orchestrator.calculateDraft({ payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['SURVEY'],
+    decisions: { holidayWork: { holidayId: 'H-1', applies: true, employeeIds: ['EMP-001'] } } });
+  assert.equal(run.valid, false);
+  assert.equal(run.errors[0].code, 'HOLIDAY_DATE_AMBIGUOUS');
+});
+
+test('transition-month NS uses earliest date for one penalty and retains all NS dates', () => {
+  const { orchestrator } = fixture({ firstWorkingDay: '2026-07-01', readDepartment(config, period, employee, attendance) {
+    return { department: config.department, period, employeeRows: [employee], attendanceRows: [
+      { ...attendance, values: ['EMP-001', '2026-09-29', 'NS'] },
+      { ...attendance, values: ['EMP-001', '2026-09-20', 'NS'] }
+    ] };
+  } });
+  const run = orchestrator.calculateDraft({ payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['SURVEY'],
+    decisions: { employeeDecisions: { 'EMP-001': { probation: { approved: false } } } } });
+  assert.equal(run.valid, true, JSON.stringify(plain(run)));
+  assert.equal(run.results[0].components.deductions.automaticAmount, 1200);
+  assert.deepEqual(plain(run.results[0].attendance.noShowDates), ['2026-09-20', '2026-09-29']);
+});
+
+test('an employed employee with no attendance rows is blocked with an Employee ID diagnostic', () => {
+  const { orchestrator } = fixture({ readDepartment(config, period, employee) {
+    return { department: config.department, period, employeeRows: [employee], attendanceRows: [] };
+  } });
+  const result = orchestrator.calculateDraft({ payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['SURVEY'] });
+  assert.equal(result.valid, false);
+  assert.equal(result.errors[0].code, 'MISSING_ATTENDANCE');
+  assert.equal(result.errors[0].department, 'SURVEY');
+  assert.equal(result.errors[0].employeeId, 'EMP-001');
+});
+
+test('attendance before an employee joined is not coverage for the employment window', () => {
+  const { orchestrator } = fixture({ firstWorkingDay: '2026-09-20', readDepartment(config, period, employee, attendance) {
+    return { department: config.department, period, employeeRows: [employee], attendanceRows: [attendance] };
+  } });
+  const result = orchestrator.calculateDraft({ payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['SURVEY'] });
+  assert.equal(result.valid, false);
+  assert.equal(result.errors[0].code, 'MISSING_ATTENDANCE');
+  assert.equal(result.errors[0].employeeId, 'EMP-001');
+});
+
+function referralFixture(options = {}) {
+  const base = fixture();
+  const employeeColumns = { employeeId: 'ID', americanName: 'Name', firstWorkingDay: 'Joined',
+    lastWorkingDay: 'Left', finalPayrollPaymentDate: 'Final Paid', referrerEmployeeId: 'Referrer', transfers: 'Transfers' };
+  const survey = { ...base.config, employeeColumns };
+  const reservations = { ...survey, department: 'RESERVATIONS' };
+  const headers = ['ID', 'Name', 'Joined', 'Left', 'Final Paid', 'Referrer', 'Transfers'];
+  function employee(values) { return { headers, values, displayValues: values.map(String), rowNumber: 2 }; }
+  const referrer = employee(['EMP-001', 'Alex', options.referrerJoined || '2026-08-01',
+    options.referrerLeft || '', options.finalPaid || '', '', 0]);
+  const referred = employee(['EMP-002', 'Blair', options.referredJoined || '2026-08-02', '', '', 'EMP-001', options.referredTransfers || 0]);
+  return fixture({ configs: [survey, reservations], getBenefitLedger: () => options.ledger || [],
+    readDepartment(config, period, unusedEmployee, attendance) {
+      const isReferrer = config.department === 'SURVEY';
+      return { department: config.department, period, employeeRows: [isReferrer ? referrer : referred],
+        attendanceRows: isReferrer && options.referrerLeft ? [] : [
+          { ...attendance, values: [isReferrer ? 'EMP-001' : 'EMP-002', '2026-09-01',
+            !isReferrer && options.badReferralAttendance ? 'BAD_STATUS' : 'PRESENT'] }
+        ] };
+    } });
+}
+
+test('referral is source-derived across departments at inclusive day 60 and ignores manual payloads', () => {
+  const { orchestrator } = referralFixture();
+  const run = orchestrator.calculateDraft({ payrollMonth: '2026-09', cutoffMode: 'MONTH_END',
+    departmentScope: ['SURVEY', 'RESERVATIONS'], decisions: { employeeDecisions: { 'EMP-001': {
+      referrals: [{ employeeId: 'FAKE', americanName: 'Injected', department: 'SURVEY',
+        firstWorkingDay: '2026-01-01', referrerEmployeeId: 'EMP-001' }]
+    } } } });
+  assert.equal(run.valid, true, JSON.stringify(plain(run)));
+  const result = run.results.find(item => item.employeeId === 'EMP-001');
+  assert.equal(result.components.referral.amount, 10000);
+  assert.deepEqual(plain(result.benefitCandidates.filter(item => item.benefitKey.startsWith('REFERRAL:')).map(item => item.benefitKey)),
+    ['REFERRAL:EMP-001:EMP-002']);
+  assert.deepEqual(plain(run.decisions.employeeDecisions['EMP-001'].referrals.map(item => item.employeeId)), ['EMP-002']);
+});
+
+test('scoped referrer discovers other department roster without validating its payroll attendance or performance', () => {
+  const { orchestrator } = referralFixture({ referredTransfers: 'bad-performance', badReferralAttendance: true });
+  const run = orchestrator.calculateDraft({ payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['SURVEY'] });
+  assert.equal(run.valid, true, JSON.stringify(plain(run)));
+  assert.deepEqual(plain(run.results.map(item => item.employeeId)), ['EMP-001']);
+  assert.equal(run.results[0].components.referral.amount, 10000);
+  assert.equal(run.referralSourceSnapshot.RESERVATIONS.employeeRows[0].values[0], 'EMP-002');
+});
+
+test('unreadable cross-department referral roster blocks a selected referrer with structured error', () => {
+  const { orchestrator } = referralFixture({ referredJoined: 'invalid-date' });
+  const report = orchestrator.validateRequest({ payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['SURVEY'] });
+  assert.equal(report.valid, false);
+  assert.equal(report.errors[0].code, 'REFERRAL_SOURCE_UNAVAILABLE');
+  assert.equal(report.errors[0].department, 'SURVEY');
+  assert.equal(report.errors[0].employeeId, 'EMP-001');
+  assert.equal(report.errors[0].sourceDepartment, 'RESERVATIONS');
+});
+
+test('former referrer receives one source-derived bonus only in later final-payroll period', () => {
+  const options = { referrerJoined: '2026-01-01', referrerLeft: '2026-08-15', finalPaid: '2026-09-15',
+    referredJoined: '2026-07-17' };
+  const request = { payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['SURVEY', 'RESERVATIONS'] };
+  const run = referralFixture(options).orchestrator.calculateDraft(request);
+  assert.equal(run.valid, true, JSON.stringify(plain(run)));
+  const former = run.results.find(item => item.employeeId === 'EMP-001');
+  assert.equal(former.window, null);
+  assert.equal(former.components.referral.amount, 10000);
+  assert.equal(former.total, 10000);
+  const paid = referralFixture({ ...options, ledger: [{ benefitKey: 'REFERRAL:EMP-001:EMP-002' }] }).orchestrator.calculateDraft(request);
+  assert.equal(paid.results.find(item => item.employeeId === 'EMP-001').components.referral.amount, 0);
+  const late = referralFixture({ ...options, referredJoined: '2026-07-19' }).orchestrator.calculateDraft(request);
+  assert.equal(late.results.find(item => item.employeeId === 'EMP-001').components.referral.amount, 0);
+  const otherMonth = referralFixture({ ...options, finalPaid: '2026-10-15' }).orchestrator.calculateDraft(request);
+  assert.equal(otherMonth.results.find(item => item.employeeId === 'EMP-001').components.referral.amount, 0);
 });
 
 test('eligible probation payments require an HR decision that is saved with the draft', () => {

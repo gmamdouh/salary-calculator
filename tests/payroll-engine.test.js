@@ -94,6 +94,7 @@ test('probation and referral are approved once, including duplicate same-run ref
   const result = run({ employee: employee(), ledger, decisions: { probation: { approved: true }, referrals: [referred,referred] } });
   assert.equal(result.components.probation.amount, 12000);
   assert.equal(result.components.referral.amount, 10000);
+  assert.equal(result.benefitCandidates.filter(candidate => candidate.benefitKey === 'REFERRAL:EMP-001:EMP-002').length, 1);
   assert.equal(ledger.length, 0);
   const paid = run({ employee: employee(), ledger: [{ benefitKey: 'PROBATION:EMP-001' },{ benefitKey: 'REFERRAL:EMP-001:EMP-002' }], decisions: { probation: { approved: true }, referrals: [referred] } });
   assert.equal(paid.components.probation.amount, 0);

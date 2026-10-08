@@ -27,18 +27,18 @@ function memoryGateway() {
 }
 
 function employeeRow(id, name, department, additions = {}) {
-  return { headers: ['ID', 'Name', 'Department', 'Joined', 'Left', 'Annual Days', 'Transfers', 'Sales', 'Conversion', 'Agents'],
+  return { headers: ['ID', 'Name', 'Department', 'Joined', 'Left', 'Annual Days', 'Transfers', 'Sales', 'Conversion', 'Agents', 'Referrer'],
     values: [id, name, department, additions.firstWorkingDay || '2026-08-01', additions.lastWorkingDay || '', additions.annualLeaveBalance || 0,
-      additions.transfers || 0, additions.sales || 0, additions.conversionRate || 0, additions.agents || ''],
+      additions.transfers || 0, additions.sales || 0, additions.conversionRate || 0, additions.agents || '', additions.referrerEmployeeId || ''],
     displayValues: [id, name, department, additions.firstWorkingDay || '2026-08-01', additions.lastWorkingDay || '', String(additions.annualLeaveBalance || 0),
-      String(additions.transfers || 0), String(additions.sales || 0), String(additions.conversionRate || 0), String(additions.agents || '')], rowNumber: 2 };
+      String(additions.transfers || 0), String(additions.sales || 0), String(additions.conversionRate || 0), String(additions.agents || ''), additions.referrerEmployeeId || ''], rowNumber: 2 };
 }
 
 function config(department) {
   return { department, spreadsheetId: `source-${department}`, leaveSpreadsheetId: `leave-${department}`,
     employeeTab: 'Team', attendanceTab: 'Attendance', employeeHeaderRow: 1, attendanceHeaderRow: 1,
     employeeColumns: { employeeId: 'ID', americanName: 'Name', department: 'Department', firstWorkingDay: 'Joined', lastWorkingDay: 'Left',
-      annualLeaveBalance: 'Annual Days', transfers: 'Transfers', sales: 'Sales', conversionRate: 'Conversion', agents: 'Agents' },
+      annualLeaveBalance: 'Annual Days', transfers: 'Transfers', sales: 'Sales', conversionRate: 'Conversion', agents: 'Agents', referrerEmployeeId: 'Referrer' },
     attendanceColumns: { employeeId: 'ID', date: 'Day', status: 'Status' },
     approvalColumns: { runId: 'Run ID', status: 'Payroll Status', paid: 'Paid' } };
 }
@@ -52,7 +52,7 @@ function integration(withDeductions = false, deductionRows) {
     RESERVATIONS: [employeeRow('EMP-RES', 'Jamie Reservations', 'RESERVATIONS', { firstWorkingDay: '2026-01-01', lastWorkingDay: '2026-09-30', annualLeaveBalance: 4, transfers: 0 })],
     SALES: [employeeRow('EMP-SAL', 'Casey Sales', 'SALES', { firstWorkingDay: '2026-01-01', sales: 37, conversionRate: 4.2 })],
     TDS: [employeeRow('EMP-TDS', 'Morgan TDS', 'TDS', { firstWorkingDay: '2026-01-01' })],
-    MANAGEMENT: [employeeRow('EMP-MGT', 'Taylor Management', 'MANAGEMENT', { firstWorkingDay: '2026-01-01' })]
+    MANAGEMENT: [employeeRow('EMP-MGT', 'Taylor Management', 'MANAGEMENT', { firstWorkingDay: '2026-08-01', referrerEmployeeId: 'EMP-SUR' })]
   };
   const attendanceRows = Object.fromEntries(Object.keys(rows).map(dept => [dept, rows[dept].map(row => ({
     headers: ['ID', 'Day', 'Status'], values: [row.values[0], '2026-09-10', dept === 'TDS' ? 'NS' : dept === 'SURVEY' ? 'HOLIDAY' : 'PRESENT'],
@@ -83,7 +83,7 @@ function integration(withDeductions = false, deductionRows) {
       { type: 'SALES_ABS', employeeId: 'EMP-SAL', payrollMonth: '2026-08', amount: 4000, paid: false }
     ], rulesVersion: 'e2e-rules-v1', clock: () => '2026-10-04T10:00:00.000Z', actor: () => 'hr@example.test',
     createRunId: () => 'RUN-E2E-2026-09', buildPeriod: () => period, getHolidayCalendar: () => [
-      { holidayName: 'September holiday', actualHolidayDate: '10-09-2026', triplePay: 'Yes' }
+       { holidayId: 'H-SEP', holidayName: 'September holiday', actualHolidayDates: ['2026-09-10'] }
     ] });
   return { configs, rows, attendanceRows, events, gateway, repository, orchestrator,
     allowWriteBack() { failWriteBack = false; } };
@@ -171,8 +171,9 @@ test('malformed Survey deduction mapping blocks Survey while All retains healthy
 test('all-department draft, audited override, approval recovery, history, and ledger are durable', () => {
   const fx = integration();
   const draft = fx.orchestrator.calculateDraft({ payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['ALL'], decisions: {
-    employeeDecisions: { 'EMP-SUR': { probation: { approved: true }, referrals: [{ employeeId: 'EMP-REF', americanName: 'Robin Referral', department: 'SURVEY', firstWorkingDay: '2026-08-01', referrerEmployeeId: 'EMP-SUR' }] },
-      'EMP-RES': { probation: { approved: false } } }
+     holidayWork: { holidayId: 'H-SEP', applies: true, employeeIds: ['EMP-SUR'] },
+     employeeDecisions: { 'EMP-SUR': { probation: { approved: true } },
+       'EMP-RES': { probation: { approved: false } } }
   } });
   assert.equal(draft.valid, true, JSON.stringify(plain(draft.errors)));
   assert.deepEqual(plain(draft.results.map(result => result.department).sort()), ['MANAGEMENT', 'RESERVATIONS', 'SALES', 'SURVEY', 'TDS']);
