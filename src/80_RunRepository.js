@@ -109,6 +109,10 @@ SalaryCalculator.RunRepository = (function () {
       var match = String(row.notes || '').match(/(?:^|;\s*)settlementRunId=([^;]+)/);
       return match ? match[1] : null;
     }
+    function settlementMonths(row) {
+      var match = String(row && row.notes || '').match(/(?:^|;\s*)reservedMonths=([^;]+)/);
+      return match ? match[1].split(',').filter(Boolean) : [];
+    }
     function settledByRun(row, runId) {
       return !!row && row.paid === true && settlementOwner(row) === runId;
     }
@@ -143,6 +147,11 @@ SalaryCalculator.RunRepository = (function () {
         }
         if (monthly && monthly.paid === true && !settledByRun(monthly, run.runId)) throw salesOwnershipConflict(monthly, key, run);
         if (!accrual.paid) return;
+        var requestedMonths = accrual.priorMonthsPaid.concat([accrual.payrollMonth]);
+        ledger.filter(function (row) { return row.type === 'SALES_ABS_SETTLEMENT' && row.employeeId === result.employeeId; }).forEach(function (claim) {
+          var ownsRequestedMonth = settlementMonths(claim).some(function (month) { return requestedMonths.indexOf(month) !== -1; });
+          if (ownsRequestedMonth && claim.runId !== run.runId) throw salesOwnershipConflict(claim, claim.benefitKey, run);
+        });
         var prior = accrual.priorMonthsPaid.map(function (month) { return ledger.find(function (row) {
           return row.benefitKey === 'SALES_ABS:' + result.employeeId + ':' + month;
         }); });
@@ -202,16 +211,25 @@ SalaryCalculator.RunRepository = (function () {
           ambiguous.issues = [{ code: 'AMBIGUOUS_LEDGER_AMOUNT', employeeId: result.employeeId, runId: run.runId }];
           throw ambiguous;
         }
+        var settlementKey = 'SALES_ABS_SETTLEMENT:' + result.employeeId + ':' + accrual.payrollMonth;
+        var reservedMonths = Array.from(new Set(accrual.priorMonthsPaid.concat([accrual.payrollMonth]))).sort();
+        var reservation = { benefitKey: settlementKey, type: 'SALES_ABS_SETTLEMENT', employeeId: result.employeeId,
+          relatedEmployeeId: null, amount: settlementAmount, payrollMonth: accrual.payrollMonth, runId: run.runId,
+          paid: false, paymentDate: run.approvalCheckpoint.approvedAt, decision: 'RESERVED', eligibility: 'APPROVED',
+          notes: 'Approved by ' + run.approvalCheckpoint.approvedBy + '; settlementRunId=' + run.runId +
+            '; reservedMonths=' + reservedMonths.join(',') };
+        var priorReservation = gateway.read(TABLES.benefits, settlementKey);
+        if (priorReservation && priorReservation.runId !== run.runId) throw salesOwnershipConflict(priorReservation, settlementKey, run);
+        if (!priorReservation) gateway.appendUnique(TABLES.benefits, settlementKey, reservation);
         [monthly].concat(settlementRows).forEach(function (row) {
           row.paid = true; row.paymentDate = run.approvalCheckpoint.approvedAt; row.decision = 'SETTLED';
           row.eligibility = 'APPROVED'; row.notes = 'Approved by ' + run.approvalCheckpoint.approvedBy + '; settlementRunId=' + run.runId;
           gateway.upsert(TABLES.benefits, row.benefitKey, row);
         });
-        var settlementKey = 'SALES_ABS_SETTLEMENT:' + result.employeeId + ':' + accrual.payrollMonth;
-        gateway.appendUnique(TABLES.benefits, settlementKey, { benefitKey: settlementKey, type: 'SALES_ABS_SETTLEMENT',
+        gateway.upsert(TABLES.benefits, settlementKey, { benefitKey: settlementKey, type: 'SALES_ABS_SETTLEMENT',
           employeeId: result.employeeId, relatedEmployeeId: null, amount: settlementAmount,
           payrollMonth: accrual.payrollMonth, runId: run.runId, paid: true, paymentDate: run.approvalCheckpoint.approvedAt,
-          decision: 'SETTLED', eligibility: 'APPROVED', notes: 'Approved by ' + run.approvalCheckpoint.approvedBy });
+          decision: 'SETTLED', eligibility: 'APPROVED', notes: reservation.notes });
       });
     }
     function finalizeBenefits(run) {

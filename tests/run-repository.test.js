@@ -249,14 +249,14 @@ test('sales accrual months settle once with the approved cumulative amount and a
   const settlement = rows.find(row => row.type === 'SALES_ABS_SETTLEMENT');
   assert.equal(settlement.amount, 12000);
   assert.equal(settlement.runId, 'RUN-SEP');
-  assert.equal(settlement.notes, 'Approved by quarter-approver');
+  assert.equal(settlement.notes, 'Approved by quarter-approver; settlementRunId=RUN-SEP; reservedMonths=2026-07,2026-08,2026-09');
   assert.equal(settlement.paymentDate, '2026-10-04T10:00:00.000Z');
   assert.equal(settlement.eligibility, 'APPROVED');
   assert.equal(settlement.decision, 'SETTLED');
   assert.equal(rows.filter(row => row.type === 'SALES_ABS_SETTLEMENT').length, 1);
 });
-test('interrupted Sales settlement resumes rows already settled by its run and blocks other runs', () => {
-  const { repository, gateway } = harness();
+test('interrupted Sales settlement reserves every input month and blocks a competitor selecting only unpaid months', () => {
+  const { repository, gateway, events } = harness();
   const salesRun = (runId, payrollMonth, amount, paid, priorMonthsPaid = [], absAmount = amount) => runRecord({ runId, payrollMonth,
     results: [{ employeeId: 'EMP-SALES', department: 'SALES', payrollMonth,
       components: { basic: { calculatedAmount: 16000, amount: 16000 }, abs: { calculatedAmount: absAmount, amount: paid ? absAmount : 0 },
@@ -282,9 +282,13 @@ test('interrupted Sales settlement resumes rows already settled by its run and b
   gateway.upsert = upsert;
   assert.equal(gateway.read('Payment Ledger', 'SALES_ABS:EMP-SALES:2026-07').paid, true);
 
-  repository.createDraft(salesRun('RUN-OCT', '2026-10', 0, true, ['2026-07', '2026-08', '2026-09'], 12000));
+  repository.createDraft(salesRun('RUN-OCT', '2026-10', 0, true, ['2026-08'], 4000));
+  const beforeCompetitor = events.length;
   assert.throws(() => repository.approve('RUN-OCT', 'other-approver'), error =>
     error.issues?.[0]?.code === 'SALES_ACCRUAL_ALREADY_CLAIMED' && error.issues[0].existingRunId === 'RUN-SEP');
+  assert.equal(events.length, beforeCompetitor);
+  assert.equal(repository.getRun('RUN-OCT').state, 'DRAFT');
+  assert.equal(gateway.read('Payment Ledger', 'SALES_ABS:EMP-SALES:2026-08').paid, false);
 
   assert.equal(repository.approve('RUN-SEP', 'retry-approver').valid, true);
   const rows = gateway.list('Payment Ledger');
@@ -292,6 +296,9 @@ test('interrupted Sales settlement resumes rows already settled by its run and b
   assert.equal(rows.find(row => row.benefitKey === 'SALES_ABS:EMP-SALES:2026-08').paid, true);
   assert.equal(rows.find(row => row.benefitKey === 'SALES_ABS:EMP-SALES:2026-09').paid, true);
   assert.equal(rows.filter(row => row.type === 'SALES_ABS_SETTLEMENT').length, 1);
+  const eventsAfterRecovery = events.length;
+  assert.equal(repository.approve('RUN-SEP', 'repeat-retry').valid, true);
+  assert.equal(events.length, eventsAfterRecovery);
 });
 test('approval rejects referral aggregate overrides that cannot be allocated without partial writes', () => {
   const { repository, gateway, events } = harness();
