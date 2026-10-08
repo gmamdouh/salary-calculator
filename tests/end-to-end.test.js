@@ -73,6 +73,10 @@ function integration(withDeductions = false, deductionRows) {
   const gateway = memoryGateway();
   const lockService = { getDocumentLock() { return { waitLock() {}, releaseLock() {} }; } };
   const repository = app.RunRepository.create({ gateway, lockService, now: () => '2026-10-04T10:00:00.000Z', sourceGateway });
+  gateway.upsert('Payment Ledger', 'SALES_ABS:EMP-SAL:2026-07', { benefitKey: 'SALES_ABS:EMP-SAL:2026-07',
+    type: 'SALES_ABS', employeeId: 'EMP-SAL', amount: 4000, payrollMonth: '2026-07', runId: 'RUN-JUL', paid: false });
+  gateway.upsert('Payment Ledger', 'SALES_ABS:EMP-SAL:2026-08', { benefitKey: 'SALES_ABS:EMP-SAL:2026-08',
+    type: 'SALES_ABS', employeeId: 'EMP-SAL', amount: 4000, payrollMonth: '2026-08', runId: 'RUN-AUG', paid: false });
   const orchestrator = app.PayrollOrchestrator.create({ sourceGateway, repository, getConfigs: () => configs,
     getRules: () => rules, getBenefitLedger: () => [
       { type: 'SALES_ABS', employeeId: 'EMP-SAL', payrollMonth: '2026-07', amount: 4000, paid: false },
@@ -189,14 +193,15 @@ test('all-department draft, audited override, approval recovery, history, and le
   assert.equal(firstApproval.valid, false);
   assert.equal(firstApproval.resumable, true);
   assert.equal(fx.repository.getRun(draft.runId).state, 'DRAFT');
-  assert.equal(fx.gateway.list('Payment Ledger').filter(row => row.runId === draft.runId).length, 2);
+  assert.equal(fx.gateway.list('Payment Ledger').filter(row => row.runId === draft.runId && !row.type.startsWith('SALES_AB')).length, 2);
   fx.allowWriteBack();
   const retry = fx.orchestrator.approveRun(draft.runId, 'approver@example.test');
   assert.equal(retry.valid, true);
   assert.equal(retry.state, 'APPROVED');
   assert.equal(fx.repository.getRun(draft.runId).state, 'APPROVED');
   assert.equal(fx.gateway.list('Payroll History').filter(row => row.state === 'APPROVED').length, 1);
-  assert.equal(fx.gateway.list('Payment Ledger').filter(row => row.runId === draft.runId).length, 2);
+  assert.equal(fx.gateway.list('Payment Ledger').filter(row => row.runId === draft.runId && !row.type.startsWith('SALES_AB')).length, 2);
+  assert.equal(fx.gateway.list('Payment Ledger').filter(row => row.type === 'SALES_ABS_SETTLEMENT' && row.runId === draft.runId).length, 1);
   assert.equal(fx.repository.listLatestResults().length, 5);
   assert.equal(fx.events.length, 6);
   assert.equal(fx.events[0].writes.length, 1);

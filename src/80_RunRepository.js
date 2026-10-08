@@ -76,7 +76,8 @@ SalaryCalculator.RunRepository = (function () {
       checkpoint.sourceWrites = copy(writes);
       return writes;
     }
-    function appendBenefits(run) {
+    function benefitRows(run) {
+      var rows = [];
       run.results.forEach(function (result) {
         (result.benefitCandidates || []).forEach(function (candidate) {
           if (!candidate || candidate.eligible !== true || typeof candidate.benefitKey !== 'string' || !candidate.benefitKey.trim()) return;
@@ -86,10 +87,108 @@ SalaryCalculator.RunRepository = (function () {
           if (typeof candidate.amount !== 'number' || !Number.isFinite(candidate.amount) || candidate.amount < 0) throw new Error('Invalid benefit amount');
           var finalAmount = parts[0] === 'PROBATION' ? result.components.probation.amount : result.components.referral.amount;
           if (!(finalAmount > 0)) return;
-          gateway.appendUnique(TABLES.benefits, key, { benefitKey: key, type: parts[0], employeeId: result.employeeId,
-            relatedEmployeeId: parts[0] === 'REFERRAL' ? parts[2] : null, amount: candidate.amount,
+          rows.push({ benefitKey: key, type: parts[0], employeeId: result.employeeId,
+            relatedEmployeeId: parts[0] === 'REFERRAL' ? parts[2] : null, amount: parts[0] === 'PROBATION' ? finalAmount : candidate.amount,
             payrollMonth: run.payrollMonth, runId: run.runId, paid: false });
         });
+        var referralRows = rows.filter(function (row) { return row.employeeId === result.employeeId && row.type === 'REFERRAL'; });
+        var referralAmount = result.components && result.components.referral && result.components.referral.amount || 0;
+        if (referralAmount > 0 && (!referralRows.length || (referralRows.length > 1 &&
+            SalaryCalculator.PayrollEngine.sumComponents({ value: referralRows.reduce(function (sum, row) { return sum + row.amount; }, 0) }) !== referralAmount))) {
+          var ambiguous = new Error('Referral aggregate cannot be allocated to the eligible referred employees');
+          ambiguous.issues = [{ code: 'AMBIGUOUS_LEDGER_AMOUNT', employeeId: result.employeeId, runId: run.runId }];
+          throw ambiguous;
+        }
+        if (referralRows.length === 1) referralRows[0].amount = referralAmount;
+      });
+      return rows;
+    }
+    function assertBenefitOwnership(run) {
+      var ledger = gateway.list(TABLES.benefits) || [];
+      benefitRows(run).forEach(function (row) {
+        var existing = ledger.find(function (item) { return item.benefitKey === row.benefitKey; });
+        if (existing && existing.runId !== run.runId) {
+          var conflict = new Error('One-time benefit is already claimed by another approved run');
+          conflict.issues = [{ code: 'BENEFIT_ALREADY_CLAIMED', benefitKey: row.benefitKey,
+            runId: run.runId, existingRunId: existing.runId }];
+          throw conflict;
+        }
+      });
+      run.results.forEach(function (result) {
+        var accrual = result.salesAccrual;
+        if (!accrual) return;
+        if (accrual.payrollMonth !== run.payrollMonth || typeof accrual.amount !== 'number' || !Number.isFinite(accrual.amount) ||
+            accrual.amount < 0 || typeof accrual.paid !== 'boolean' || !Array.isArray(accrual.priorMonthsPaid)) throw new Error('Invalid Sales accrual record');
+        var key = 'SALES_ABS:' + result.employeeId + ':' + accrual.payrollMonth;
+        var monthly = ledger.find(function (item) { return item.benefitKey === key; });
+        if (monthly && monthly.runId !== run.runId) {
+          var occupied = new Error('Sales accrual month already belongs to another approved run');
+          occupied.issues = [{ code: 'SALES_ACCRUAL_ALREADY_CLAIMED', benefitKey: key, runId: run.runId, existingRunId: monthly.runId }];
+          throw occupied;
+        }
+        if (!accrual.paid) return;
+        var prior = accrual.priorMonthsPaid.map(function (month) { return ledger.find(function (row) {
+          return row.benefitKey === 'SALES_ABS:' + result.employeeId + ':' + month;
+        }); });
+        if (prior.some(function (row) { return !row || row.type !== 'SALES_ABS' || row.paid === true; })) throw new Error('Sales settlement is missing an unpaid prior accrual');
+        var expected = accrual.amount + prior.reduce(function (sum, row) { return sum + row.amount; }, 0);
+        if (!result.components || !result.components.abs || result.components.abs.amount !== expected) {
+          var ambiguous = new Error('Sales settlement total cannot be allocated to its monthly accruals');
+          ambiguous.issues = [{ code: 'AMBIGUOUS_LEDGER_AMOUNT', employeeId: result.employeeId, runId: run.runId }];
+          throw ambiguous;
+        }
+      });
+    }
+    function appendBenefits(run) {
+      benefitRows(run).forEach(function (row) {
+        row.paymentDate = run.approvalCheckpoint.approvedAt;
+        row.decision = 'APPROVED'; row.eligibility = 'APPROVED'; row.notes = 'Approved by ' + run.approvalCheckpoint.approvedBy;
+        gateway.appendUnique(TABLES.benefits, row.benefitKey, row);
+      });
+      run.results.forEach(function (result) {
+        var accrual = result.salesAccrual;
+        if (!accrual) return;
+        if (accrual.payrollMonth !== run.payrollMonth || typeof accrual.amount !== 'number' ||
+            !Number.isFinite(accrual.amount) || accrual.amount < 0 || typeof accrual.paid !== 'boolean' ||
+            !Array.isArray(accrual.priorMonthsPaid)) throw new Error('Invalid Sales accrual record');
+        var key = 'SALES_ABS:' + result.employeeId + ':' + accrual.payrollMonth;
+        var monthly = { benefitKey: key, type: 'SALES_ABS', employeeId: result.employeeId, relatedEmployeeId: null,
+          amount: accrual.amount, payrollMonth: accrual.payrollMonth, runId: run.runId, paid: false,
+          paymentDate: run.approvalCheckpoint.approvedAt, decision: 'ACCRUED', eligibility: 'APPROVED',
+          notes: 'Approved by ' + run.approvalCheckpoint.approvedBy };
+        var existing = gateway.read(TABLES.benefits, key);
+        if (existing && existing.runId !== run.runId) {
+          var conflict = new Error('Sales accrual month already belongs to another approved run');
+          conflict.issues = [{ code: 'SALES_ACCRUAL_ALREADY_CLAIMED', benefitKey: key, runId: run.runId, existingRunId: existing.runId }];
+          throw conflict;
+        }
+        gateway.appendUnique(TABLES.benefits, key, monthly);
+        if (!accrual.paid) return;
+        var priorKeys = accrual.priorMonthsPaid.map(function (month) { return 'SALES_ABS:' + result.employeeId + ':' + month; });
+        var ledger = gateway.list(TABLES.benefits) || [], settlementRows = priorKeys.map(function (priorKey) {
+          var row = ledger.find(function (item) { return item.benefitKey === priorKey; });
+          if (!row || row.type !== 'SALES_ABS' || row.employeeId !== result.employeeId || row.paid === true) {
+            throw new Error('Sales settlement is missing an unpaid prior accrual');
+          }
+          return row;
+        });
+        var settlementAmount = accrual.amount + settlementRows.reduce(function (sum, row) { return sum + row.amount; }, 0);
+        var total = result.components && result.components.abs && result.components.abs.amount;
+        if (total !== settlementAmount) {
+          var ambiguous = new Error('Sales settlement total cannot be allocated to its monthly accruals');
+          ambiguous.issues = [{ code: 'AMBIGUOUS_LEDGER_AMOUNT', employeeId: result.employeeId, runId: run.runId }];
+          throw ambiguous;
+        }
+        [monthly].concat(settlementRows).forEach(function (row) {
+          row.paid = true; row.paymentDate = run.approvalCheckpoint.approvedAt; row.decision = 'SETTLED';
+          row.eligibility = 'APPROVED'; row.notes = 'Approved by ' + run.approvalCheckpoint.approvedBy + '; settlementRunId=' + run.runId;
+          gateway.upsert(TABLES.benefits, row.benefitKey, row);
+        });
+        var settlementKey = 'SALES_ABS_SETTLEMENT:' + result.employeeId + ':' + accrual.payrollMonth;
+        gateway.appendUnique(TABLES.benefits, settlementKey, { benefitKey: settlementKey, type: 'SALES_ABS_SETTLEMENT',
+          employeeId: result.employeeId, relatedEmployeeId: null, amount: settlementAmount,
+          payrollMonth: accrual.payrollMonth, runId: run.runId, paid: true, paymentDate: run.approvalCheckpoint.approvedAt,
+          decision: 'SETTLED', eligibility: 'APPROVED', notes: 'Approved by ' + run.approvalCheckpoint.approvedBy });
       });
     }
     function approvalResult(run) {
@@ -153,6 +252,7 @@ SalaryCalculator.RunRepository = (function () {
       return locked(function () {
         var run = getRun(runId);
         assertDraftComplete(run);
+        if (run.state === 'DRAFT' && !run.approvalCheckpoint) assertBenefitOwnership(run);
         if (run.state === 'SUPERSEDED') return approvalResult(run);
         if (run.state === 'APPROVED' && run.writeBackStatus === 'COMPLETE') {
           if (run.approvalCheckpoint && run.approvalCheckpoint.latestStatus === 'PENDING') publishLatest(run);

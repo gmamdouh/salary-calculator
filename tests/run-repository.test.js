@@ -33,6 +33,15 @@ function harness() {
   const repository = RunRepository.create({ gateway, lockService, sourceGateway, now: () => '2026-10-04T10:00:00.000Z' });
   return { repository, gateway, sourceGateway, lockService, tables, events, state, isLocked: () => held };
 }
+function runWithoutOneTimeBenefits(overrides = {}) {
+  const run = runRecord(overrides);
+  run.results.forEach(result => {
+    result.benefitCandidates = [];
+    result.components.probation.amount = 0;
+    result.components.probation.calculatedAmount = 0;
+  });
+  return run;
+}
 test('draft preserves rules, inputs and results independently of caller mutations', () => {
   const { repository, events } = harness();
   const input = runRecord(), draft = repository.createDraft(input);
@@ -131,6 +140,78 @@ test('approval is immutable and retry returns the same approval without duplicat
   assert.ok(events.findIndex(event => event[0] === 'append' && event[1] === 'Payment Ledger') < sourceIndex);
   assert.equal(isLocked(), false);
 });
+test('one-time benefit ownership is claimed by the first approved draft and conflicts have no side effects', () => {
+  const { repository, gateway, events } = harness();
+  repository.createDraft(runRecord());
+  repository.createDraft(runRecord({ runId: 'RUN-002', version: 2 }));
+  repository.applyOverride('RUN-001', 'EMP-001', 'probation', 9000, 'Final approved amount', 'editor');
+  repository.approve('RUN-001', 'approver-one');
+  const before = events.length;
+  assert.throws(() => repository.approve('RUN-002', 'approver-two'), error =>
+    error.issues?.[0]?.code === 'BENEFIT_ALREADY_CLAIMED' && error.issues[0].benefitKey === 'PROBATION:EMP-001');
+  assert.equal(repository.getRun('RUN-002').state, 'DRAFT');
+  assert.equal(gateway.read('Payment Ledger', 'PROBATION:EMP-001').runId, 'RUN-001');
+  assert.equal(events.length, before);
+  const firstRetry = repository.approve('RUN-001', 'retry-approver');
+  const secondRetry = repository.approve('RUN-001', 'approver-one');
+  assert.deepEqual(plain(secondRetry), plain(firstRetry));
+  assert.equal(gateway.list('Payment Ledger').length, 1);
+  const benefitRow = gateway.read('Payment Ledger', 'PROBATION:EMP-001');
+  assert.equal(benefitRow.amount, 9000);
+  assert.equal(benefitRow.runId, 'RUN-001');
+  assert.equal(benefitRow.paymentDate, '2026-10-04T10:00:00.000Z');
+  assert.equal(benefitRow.decision, 'APPROVED');
+  assert.equal(benefitRow.eligibility, 'APPROVED');
+  assert.equal(benefitRow.notes, 'Approved by approver-one');
+});
+test('sales accrual months settle once with the approved cumulative amount and approval metadata', () => {
+  const { repository, gateway } = harness();
+  const salesRun = (runId, payrollMonth, amount, paid, priorMonthsPaid = [], absAmount = amount) => {
+    const record = runRecord({ runId, payrollMonth, results: [{ employeeId: 'EMP-SALES', department: 'SALES', payrollMonth,
+      components: { basic: { calculatedAmount: 16000, amount: 16000 }, abs: { calculatedAmount: absAmount, amount: paid ? absAmount : 0 },
+        probation: { calculatedAmount: 0, amount: 0 }, referral: { calculatedAmount: 0, amount: 0 } },
+      total: 16000 + (paid ? absAmount : 0), benefitCandidates: [],
+      salesAccrual: { payrollMonth, amount, paid, priorMonthsPaid } }] });
+    return record;
+  };
+  repository.createDraft(salesRun('RUN-JUL', '2026-07', 3000, false));
+  repository.approve('RUN-JUL', 'approver');
+  repository.createDraft(salesRun('RUN-AUG', '2026-08', 4000, false));
+  repository.approve('RUN-AUG', 'approver');
+  repository.createDraft(salesRun('RUN-SEP', '2026-09', 5000, true, ['2026-07', '2026-08'], 12000));
+  repository.approve('RUN-SEP', 'quarter-approver');
+  repository.approve('RUN-SEP', 'retry-approver');
+  const rows = gateway.list('Payment Ledger');
+  assert.equal(rows.filter(row => row.type === 'SALES_ABS').length, 3);
+  assert.equal(rows.find(row => row.benefitKey === 'SALES_ABS:EMP-SALES:2026-07').paid, true);
+  assert.equal(rows.find(row => row.benefitKey === 'SALES_ABS:EMP-SALES:2026-08').paid, true);
+  assert.equal(rows.find(row => row.benefitKey === 'SALES_ABS:EMP-SALES:2026-09').paid, true);
+  const settlement = rows.find(row => row.type === 'SALES_ABS_SETTLEMENT');
+  assert.equal(settlement.amount, 12000);
+  assert.equal(settlement.runId, 'RUN-SEP');
+  assert.equal(settlement.notes, 'Approved by quarter-approver');
+  assert.equal(settlement.paymentDate, '2026-10-04T10:00:00.000Z');
+  assert.equal(settlement.eligibility, 'APPROVED');
+  assert.equal(settlement.decision, 'SETTLED');
+  assert.equal(rows.filter(row => row.type === 'SALES_ABS_SETTLEMENT').length, 1);
+});
+test('approval rejects referral aggregate overrides that cannot be allocated without partial writes', () => {
+  const { repository, gateway, events } = harness();
+  const input = runRecord({ results: [{ ...runRecord().results[0], components: {
+    basic: { calculatedAmount: 15000, amount: 15000 }, probation: { calculatedAmount: 0, amount: 0 },
+    referral: { calculatedAmount: 300, amount: 150 }, deductions: { calculatedAmount: 0, amount: 0 }
+  }, benefitCandidates: [
+    { eligible: true, amount: 100, benefitKey: 'REFERRAL:EMP-001:EMP-002' },
+    { eligible: true, amount: 200, benefitKey: 'REFERRAL:EMP-001:EMP-003' }
+  ], total: 15150 }] });
+  repository.createDraft(input);
+  const before = events.length;
+  assert.throws(() => repository.approve(input.runId, 'approver'), error =>
+    error.issues?.[0]?.code === 'AMBIGUOUS_LEDGER_AMOUNT');
+  assert.equal(repository.getRun(input.runId).state, 'DRAFT');
+  assert.equal(gateway.list('Payment Ledger').length, 0);
+  assert.equal(events.length, before);
+});
 test('approval only sets paid markers for positive final-run payments and leaves other markers untouched', () => {
   const { repository, events } = harness();
   const input = runRecord({ sourceConfigs: [mappingConfig({ approvalColumns: {
@@ -222,7 +303,7 @@ test('completed approval retry does not replace a newer latest result or write a
   const { repository, gateway, events } = harness();
   repository.createDraft(runRecord());
   const first = repository.approve('RUN-001', 'approver');
-  repository.createDraft(runRecord({ runId: 'RUN-002', version: 2 }));
+  repository.createDraft(runWithoutOneTimeBenefits({ runId: 'RUN-002', version: 2 }));
   repository.approve('RUN-002', 'approver');
   const latestBeforeRetry = gateway.read('Latest Results', 'EMP-001');
   const eventsBeforeRetry = events.length;
@@ -238,7 +319,7 @@ test('incomplete approved write-back resumes only the source step without ledger
   const run = repository.getRun('RUN-001');
   run.writeBackStatus = 'FAILED';
   gateway.upsert('Payroll Runs', run.runId, run);
-  repository.createDraft(runRecord({ runId: 'RUN-002', version: 2 }));
+  repository.createDraft(runWithoutOneTimeBenefits({ runId: 'RUN-002', version: 2 }));
   repository.approve('RUN-002', 'approver');
   const latestBeforeRetry = gateway.read('Latest Results', 'EMP-001');
   const eventsBeforeRetry = events.slice();
@@ -254,7 +335,7 @@ test('failed draft checkpoint retry does not replace a newer latest result or re
   state.failSource = true;
   repository.approve('RUN-001', 'approver');
   state.failSource = false;
-  repository.createDraft(runRecord({ runId: 'RUN-002', version: 2 }));
+  repository.createDraft(runWithoutOneTimeBenefits({ runId: 'RUN-002', version: 2 }));
   repository.approve('RUN-002', 'approver');
   const latestBeforeRetry = gateway.read('Latest Results', 'EMP-001');
   const eventCountBeforeRetry = events.length;
@@ -266,9 +347,9 @@ test('failed draft checkpoint retry does not replace a newer latest result or re
 });
 test('failed draft checkpoint retry replaces an older payroll month in Latest Results', () => {
   const { repository, gateway, state } = harness();
-  repository.createDraft(runRecord({ runId: 'RUN-000', payrollMonth: '2026-08', version: 1 }));
+  repository.createDraft(runWithoutOneTimeBenefits({ runId: 'RUN-000', payrollMonth: '2026-08', version: 1 }));
   repository.approve('RUN-000', 'approver');
-  repository.createDraft(runRecord({ runId: 'RUN-001', payrollMonth: '2026-09', version: 2 }));
+  repository.createDraft(runWithoutOneTimeBenefits({ runId: 'RUN-001', payrollMonth: '2026-09', version: 2 }));
   state.failSource = true;
   repository.approve('RUN-001', 'approver');
   state.failSource = false;
@@ -293,7 +374,7 @@ test('superseded run versions remain readable after replacement approval', () =>
   const { repository, gateway } = harness();
   repository.createDraft(runRecord());
   repository.approve('RUN-001', 'approver');
-  repository.createDraft(runRecord({ runId: 'RUN-002', version: 2 }));
+  repository.createDraft(runWithoutOneTimeBenefits({ runId: 'RUN-002', version: 2 }));
   repository.approve('RUN-002', 'approver');
   repository.supersede('RUN-001', 'RUN-002');
   assert.equal(repository.getRun('RUN-001').state, 'SUPERSEDED');
