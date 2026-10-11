@@ -18,6 +18,7 @@ SalaryCalculator.MappingConfig = (function () {
   }
   var employeeRequired = ['employeeId', 'americanName', 'firstWorkingDay'];
   var attendanceRequired = ['employeeId', 'date', 'status'];
+  var attendanceStatuses = ['PRESENT', 'LEAVE', 'NS', 'OFF', 'WORKED_OFF', 'HOLIDAY', 'ABSENT'];
   function issue(mapping, kind, row, field, code, message, column) {
     return { code: code, message: message, field: field, spreadsheetId: kind === 'attendance' ? mapping.leaveSpreadsheetId : kind === 'deduction' ? mapping.deductionSpreadsheetId : mapping.spreadsheetId,
       tab: mapping[kind + 'Tab'], row: row, column: column === undefined ? null : column };
@@ -79,7 +80,7 @@ SalaryCalculator.MappingConfig = (function () {
       }
       if (config.statusCodes !== undefined) {
         if (!config.statusCodes || typeof config.statusCodes !== 'object' || Array.isArray(config.statusCodes)) add('statusCodes', 'Status codes must be an object');
-        else Object.keys(config.statusCodes).forEach(function (key) { if (['PRESENT', 'LEAVE', 'NS', 'OFF', 'HOLIDAY', 'ABSENT'].indexOf(config.statusCodes[key]) === -1) add('statusCodes', 'Invalid canonical attendance status'); });
+        else Object.keys(config.statusCodes).forEach(function (key) { if (attendanceStatuses.indexOf(config.statusCodes[key]) === -1) add('statusCodes', 'Invalid canonical attendance status'); });
       }
     });
     return { valid: !errors.length, errors: errors, warnings: [] };
@@ -175,7 +176,7 @@ SalaryCalculator.MappingConfig = (function () {
       try { record.date = date(source.values.date, mapping.dateFormat); } catch (error) { add('date', 'INVALID_DATE', error.message); }
       var status = text(source.values.status), codes = mapping.statusCodes || {};
       record.status = Object.prototype.hasOwnProperty.call(codes, status) ? codes[status] : status.toUpperCase();
-      if (['PRESENT', 'LEAVE', 'NS', 'OFF', 'HOLIDAY', 'ABSENT'].indexOf(record.status) === -1) add('status', 'INVALID_STATUS', 'Unknown attendance status');
+      if (attendanceStatuses.indexOf(record.status) === -1) add('status', 'INVALID_STATUS', 'Unknown attendance status');
       var key = record.employeeId + '\u0000' + record.date;
       if (record.employeeId && record.date && seen[key]) add('employeeId', 'DUPLICATE_ATTENDANCE', 'Duplicate Employee ID and date');
       seen[key] = true;

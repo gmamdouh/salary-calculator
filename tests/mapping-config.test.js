@@ -59,11 +59,14 @@ test('invalid employee dates and numbers block with exact source cell coordinate
 test('attendance layouts use Employee ID and date, filter the cutoff, and block duplicate daily identity', () => {
   const { MappingConfig, PayrollPeriod } = loadAppsScript();
   const period = PayrollPeriod.buildPeriod(periodOptions());
-  const rows = [{ ID: 'EMP-001', Day: '2026-09-01', Code: 'PRESENT' }, { ID: 'EMP-001', Day: '2026-09-02', Code: 'NS' }, { ID: 'EMP-001', Day: '2026-10-01', Code: 'LEAVE' }];
+  const rows = [{ ID: 'EMP-001', Day: '2026-09-01', Code: 'PRESENT' }, { ID: 'EMP-001', Day: '2026-09-02', Code: 'NS' },
+    { ID: 'EMP-001', Day: '2026-09-03', Code: 'WORKED_OFF' }, { ID: 'EMP-001', Day: '2026-10-01', Code: 'LEAVE' }];
   const normalized = MappingConfig.normalizeAttendance(rows, mappingConfig(), period);
-  assert.deepEqual(plain(normalized), [{ employeeId: 'EMP-001', date: '2026-09-01', status: 'PRESENT' }, { employeeId: 'EMP-001', date: '2026-09-02', status: 'NS' }]);
-  const alternate = mappingConfig({ attendanceColumns: { employeeId: 'Key', date: 'When', status: 'Mark' }, statusCodes: { P: 'PRESENT', N: 'NS' } });
-  assert.deepEqual(plain(MappingConfig.normalizeAttendance([{ Key: 'EMP-001', When: '2026-09-01', Mark: 'P' }, { Key: 'EMP-001', When: '2026-09-02', Mark: 'N' }], alternate, period)), plain(normalized));
+  assert.deepEqual(plain(normalized), [{ employeeId: 'EMP-001', date: '2026-09-01', status: 'PRESENT' },
+    { employeeId: 'EMP-001', date: '2026-09-02', status: 'NS' }, { employeeId: 'EMP-001', date: '2026-09-03', status: 'WORKED_OFF' }]);
+  const alternate = mappingConfig({ attendanceColumns: { employeeId: 'Key', date: 'When', status: 'Mark' }, statusCodes: { P: 'PRESENT', N: 'NS', W: 'WORKED_OFF' } });
+  assert.deepEqual(plain(MappingConfig.normalizeAttendance([{ Key: 'EMP-001', When: '2026-09-01', Mark: 'P' },
+    { Key: 'EMP-001', When: '2026-09-02', Mark: 'N' }, { Key: 'EMP-001', When: '2026-09-03', Mark: 'W' }], alternate, period)), plain(normalized));
   assert.throws(() => MappingConfig.normalizeAttendance([rows[0], rows[0]], mappingConfig(), period), error => error.issues[0].code === 'DUPLICATE_ATTENDANCE');
   for (const [field, value, code] of [['ID', '', 'MISSING_EMPLOYEE_ID'], ['Day', '2026-09-31', 'INVALID_DATE'], ['Code', 'UNKNOWN', 'INVALID_STATUS']]) {
     const invalid = { ...rows[0], [field]: value };

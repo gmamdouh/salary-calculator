@@ -405,7 +405,7 @@ SalaryCalculator.PayrollOrchestrator = (function () {
             if (entry.status === 'PRESENT') attendance.attendedScheduledDays++;
             if (entry.status === 'LEAVE') attendance.leaveDays++;
             if (entry.status === 'NS') { attendance.nsPresent = true; attendance.noShowDates.push(entry.date); }
-            if (entry.status === 'OFF') attendance.workedOffDays.push(entry.date);
+            if (entry.status === 'WORKED_OFF') attendance.workedOffDays.push(entry.date);
           });
           attendance.noShowDates.sort();
           attendance.noShowDate = attendance.noShowDates[0] || null;

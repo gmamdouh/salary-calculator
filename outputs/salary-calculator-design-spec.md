@@ -355,6 +355,8 @@ A former employee may receive the referral bonus in final payroll if the referre
 
 Working a scheduled off-day adds one Basic daily rate because the day becomes double-paid. The normal day's salary is already included in Basic.
 
+Attendance status `OFF` is schedule evidence only and does not create extra pay. The distinct affirmative status `WORKED_OFF` records that the employee actually worked the scheduled off-day and is the only attendance status that adds this +1 unit.
+
 ### 13.2 Government Holiday Work
 
 Working an eligible government holiday adds two Basic daily rates because the day becomes triple-paid.

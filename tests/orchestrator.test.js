@@ -349,6 +349,34 @@ test('HOLIDAY attendance without an affirmative dated HR decision pays no holida
   assert.equal(declined.results[0].components.extraDays.units, 0);
 });
 
+test('plain OFF attendance is schedule evidence and does not pay an extra day', () => {
+  const { orchestrator } = fixture({
+    readDepartment(config, period, employee, attendance) {
+      return { department: config.department, period, employeeRows: [employee], attendanceRows: [
+        { ...attendance, values: ['EMP-001', '2026-09-14', 'OFF'] }
+      ] };
+    }
+  });
+  const run = orchestrator.calculateDraft({ payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['SURVEY'] });
+  assert.equal(run.valid, true, JSON.stringify(plain(run)));
+  assert.equal(run.results[0].components.extraDays.units, 0);
+  assert.equal(run.results[0].components.extraDays.amount, 0);
+});
+
+test('explicit WORKED_OFF attendance pays one extra Basic day', () => {
+  const { orchestrator } = fixture({
+    readDepartment(config, period, employee, attendance) {
+      return { department: config.department, period, employeeRows: [employee], attendanceRows: [
+        { ...attendance, values: ['EMP-001', '2026-09-14', 'WORKED_OFF'] }
+      ] };
+    }
+  });
+  const run = orchestrator.calculateDraft({ payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['SURVEY'] });
+  assert.equal(run.valid, true, JSON.stringify(plain(run)));
+  assert.equal(run.results[0].components.extraDays.units, 1);
+  assert.equal(run.results[0].components.extraDays.amount, 400);
+});
+
 test('separate holiday decisions select different employees by exact calendar date', () => {
   const employeeB = { headers: ['ID', 'Name', 'Joined', 'Transfers'],
     values: ['EMP-002', 'Blair', '2026-08-01', 0], rowNumber: 3 };
@@ -371,11 +399,11 @@ test('separate holiday decisions select different employees by exact calendar da
   ]);
 });
 
-test('approved holiday overlapping an OFF record pays two total units, not three', () => {
+test('approved holiday overlapping a WORKED_OFF record pays two total units, not three', () => {
   const { orchestrator } = fixture({ holidays: [{ holidayId: 'H-1', actualHolidayDates: ['2026-09-14'] }],
     readDepartment(config, period, employee, attendance) {
       return { department: config.department, period, employeeRows: [employee], attendanceRows: [
-        { ...attendance, values: ['EMP-001', '2026-09-14', 'OFF'] }
+        { ...attendance, values: ['EMP-001', '2026-09-14', 'WORKED_OFF'] }
       ] };
     } });
   const run = orchestrator.calculateDraft({ payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['SURVEY'],
