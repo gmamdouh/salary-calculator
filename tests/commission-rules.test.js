@@ -33,3 +33,24 @@ test('legacy seeded bands normalize without changing boundary payouts', () => {
   assert.equal(Commission.calculateSales(0, 4.2, rules).ratePerSale, 450);
   assert.equal(Commission.calculateSales(37, 4.2, rules).amount, 24050);
 });
+
+test('overflowing numeric strings and TDS thresholds are rejected as rule errors', () => {
+  const { Commission } = loadAppsScript();
+  const digits = '9'.repeat(400);
+  const rows = Commission.defaultRows();
+  rows.find(row => row[1] === 'SURVEY' && row[2] === '1-200')[3] = digits;
+  assert.throws(() => Commission.parseRows(rows), error => error.issues?.[0].code === 'INVALID_COMMISSION_RULE');
+  rows.find(row => row[1] === 'SURVEY' && row[2] === '1-200')[3] = 10;
+  rows.find(row => row[1] === 'TDS')[2] = 'transfers > ' + digits;
+  assert.throws(() => Commission.parseRows(rows), error => error.issues?.[0].code === 'INVALID_COMMISSION_RULE');
+  rows.find(row => row[1] === 'TDS')[2] = 'transfers > 9007199254740992';
+  assert.throws(() => Commission.parseRows(rows), error => error.issues?.[0].code === 'INVALID_COMMISSION_RULE');
+});
+
+test('commission calculation rejects a nonfinite amount from individually finite inputs', () => {
+  const { Commission } = loadAppsScript();
+  const rows = Commission.defaultRows();
+  rows.find(row => row[1] === 'SALES' && row[2] === '6.00%+|50+')[3] = 1e308;
+  const rules = Commission.parseRows(rows);
+  assert.throws(() => Commission.calculateSales(50, 6, rules), /finite/i);
+});

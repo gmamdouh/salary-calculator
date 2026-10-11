@@ -157,7 +157,7 @@ SalaryCalculator.WorkbookSetup = (function () {
       identities[key] = true;
       if (String(row[0]).trim().toUpperCase() === 'COMMISSION' && !defaults[key] &&
           !/^COMMISSION\|SALES\|.+\|1-19$/.test(key)) customCommission[String(row[1]).trim().toUpperCase()] = true;
-      if (String(row[0]).trim().toUpperCase() === 'COMMISSION' && row[1] === 'SALES' && /\|1-19$/.test(key))
+      if (String(row[0]).trim().toUpperCase() === 'COMMISSION' && String(row[1]).trim().toUpperCase() === 'SALES' && /\|1-19$/.test(key))
         identities[key.replace(/\|1-19$/, '|0-19')] = true;
     });
     var missing = rows.filter(function (row) { return !identities[identity(row)] &&

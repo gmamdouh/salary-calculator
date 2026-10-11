@@ -35,7 +35,9 @@ SalaryCalculator.Commission = (function () {
     if (!((typeof value === 'number' && Number.isFinite(value)) ||
         (typeof value === 'string' && /^\d+(?:\.\d+)?$/.test(value.trim()))) || Number(value) < 0)
       problem('Commission rate must be a finite nonnegative number', row);
-    return Number(value);
+    var parsed = Number(value);
+    if (!Number.isFinite(parsed)) problem('Commission rate must be a finite nonnegative number', row);
+    return parsed;
   }
   function range(key, row, percent) {
     var pattern = percent ? /^(\d+\.\d{2})%-(\d+\.\d{2})%$|^(\d+\.\d{2})%\+$/ : /^(\d+)-(\d+)$|^(\d+)\+$/;
@@ -44,6 +46,7 @@ SalaryCalculator.Commission = (function () {
     var scale = percent ? 100 : 1;
     var min = Math.round(Number(match[1] || match[3]) * scale);
     var max = match[2] === undefined ? null : Math.round(Number(match[2]) * scale);
+    if (!Number.isSafeInteger(min) || (max !== null && !Number.isSafeInteger(max))) problem('Commission band is outside the supported range: ' + key, row);
     if (max !== null && max < min) problem('Reversed commission band: ' + key, row);
     return { min: min, max: max };
   }
@@ -88,7 +91,9 @@ SalaryCalculator.Commission = (function () {
         if (result.tds) problem('Duplicate TDS commission rule', number);
         var match = /^transfers\s*>\s*(\d+)$/.exec(key);
         if (!match) problem('TDS rule must use transfers > N', number);
-        result.tds = { threshold: Number(match[1]), rate: rate(row[3], number) };
+        var threshold = Number(match[1]);
+        if (!Number.isSafeInteger(threshold) || threshold < 0) problem('TDS threshold is outside the supported range', number);
+        result.tds = { threshold: threshold, rate: rate(row[3], number) };
       } else problem('Unknown commission department: ' + department, number);
     });
     contiguous(result.survey, 1, 'Survey');
@@ -109,6 +114,10 @@ SalaryCalculator.Commission = (function () {
     if (!rules || !rules.survey || !rules.reservations || !rules.sales || !rules.tds) throw new Error('Validated commission rules are required');
     return rules;
   }
+  function finiteAmount(amount) {
+    if (!Number.isFinite(amount)) throw new Error('Commission amount must be finite');
+    return amount;
+  }
   function bandFor(bands, value) { return bands.find(function (band) { return value >= band.min && (band.max === null || value <= band.max); }); }
   function calculateSurvey(transfers, rules) {
     count(transfers, 'transfers');
@@ -118,15 +127,15 @@ SalaryCalculator.Commission = (function () {
     if (!band) throw new Error('Survey commission band missing');
     if (band.mode === 'PROGRESSIVE_AFTER_FIRST') {
       var first = bands[0];
-      return first.max * first.rate + (transfers - first.max) * band.rate;
+      return finiteAmount(first.max * first.rate + (transfers - first.max) * band.rate);
     }
-    return transfers * band.rate;
+    return finiteAmount(transfers * band.rate);
   }
   function calculateReservations(transfers, rules) {
     count(transfers, 'transfers');
-    return schedule(rules).reservations.reduce(function (sum, band) {
+    return finiteAmount(schedule(rules).reservations.reduce(function (sum, band) {
       return sum + Math.max(0, Math.min(transfers, band.max === null ? transfers : band.max) - band.min + 1) * band.rate;
-    }, 0);
+    }, 0));
   }
   function calculateSales(sales, conversionRate, rules) {
     count(sales, 'sales');
@@ -135,7 +144,7 @@ SalaryCalculator.Commission = (function () {
     var band = bandFor(schedule(rules).sales, conversion);
     var bracket = band && bandFor(band.brackets, sales);
     if (!bracket) throw new Error('Sales commission band missing');
-    return { ratePerSale: bracket.rate, amount: sales * bracket.rate, band: band.label };
+    return { ratePerSale: bracket.rate, amount: finiteAmount(sales * bracket.rate), band: band.label };
   }
   function calculateTds(agents, rules) {
     if (!Array.isArray(agents)) throw new Error('agents must be an array');
@@ -145,7 +154,7 @@ SalaryCalculator.Commission = (function () {
       count(transfers, 'agent transfers');
       return total + (transfers > tds.threshold ? 1 : 0);
     }, 0);
-    return { qualifyingCount: qualifyingCount, amount: qualifyingCount * tds.rate };
+    return { qualifyingCount: qualifyingCount, amount: finiteAmount(qualifyingCount * tds.rate) };
   }
   return { defaultRows: defaultRows, parseRows: parseRows, calculateSurvey: calculateSurvey,
     calculateReservations: calculateReservations, calculateSales: calculateSales, calculateTds: calculateTds };

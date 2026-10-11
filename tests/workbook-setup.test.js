@@ -148,6 +148,18 @@ test('initialization fills missing rules while preserving edited and legacy comm
   assert.equal(Commission.parseRows(rows).sales.length, 5);
 });
 
+test('mixed-case legacy Sales rows keep their rate without a duplicate zero-sales seed', () => {
+  const { WorkbookSetup, Commission } = loadAppsScript();
+  const spreadsheet = fakeSpreadsheet();
+  const sheet = spreadsheet.insertSheet('Salary Rules');
+  sheet.getRange(1, 1, 1, 5).setValues([expectedHeaders['Salary Rules']]);
+  sheet.getRange(2, 1, 1, 5).setValues([['commission', 'sAlEs', '4.00%-4.99%|1-19', 475, 'edited legacy row']]);
+  WorkbookSetup.initialize(spreadsheet, policy);
+  const rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, 5).getValues();
+  assert.equal(rows.filter(row => String(row[1]).toUpperCase() === 'SALES' && /4\.00%-4\.99%\|(0-19|1-19)/.test(row[2])).length, 1);
+  assert.equal(Commission.parseRows(rows).sales.find(band => band.min === 400).brackets[0].rate, 475);
+});
+
 test('history stores the original rules snapshot when later runs use edited rates', () => {
   const { WorkbookSetup } = loadAppsScript();
   const spreadsheet = fakeSpreadsheet();
