@@ -21,18 +21,20 @@
         <label>Payroll month <input id="payrollMonth" type="month" required></label>
         <label>Cutoff <select id="cutoffMode"><option value="TODAY">Through today</option><option value="MONTH_END">Month end</option></select></label>
         <label>Department <select id="department"><option value="ALL">All</option><option>SURVEY</option><option>RESERVATIONS</option><option>SALES</option><option>TDS</option><option>MANAGEMENT</option></select></label>
-        <label>Holiday <select id="holidayId"><option value="">Choose a holiday when one applies</option></select></label>
         <button type="button" id="loadSetup">Load setup</button>
+        <label>Resume run ID (optional) <input id="resumeRunId" type="text" placeholder="Last run is suggested automatically"></label>
+        <button type="button" id="resumeRun">Resume saved run</button>
       </section>
       <section class="panel" id="panel-validate" data-panel="validate" hidden>
-        <h2>Validate</h2><div id="validationSummary"></div><div id="partialDepartmentDetails" class="errors" role="status" aria-live="polite"></div>
-        <label id="partialDepartmentAckLabel" hidden><input id="partialDepartmentAck" type="checkbox"> I reviewed and acknowledge the departments omitted from this partial payroll run.</label>
+        <h2>Validate</h2><div id="validationSummary"></div><div id="partialDepartmentDetails" class="errors" role="status" aria-live="polite" hidden></div>
+        <label id="partialDepartmentAckLabel" hidden><input id="partialDepartmentAck" type="checkbox"> I reviewed and acknowledge every omitted department and employee in this partial payroll run.</label>
         <button type="button" id="validateRun">Validate sources</button>
-        <button type="button" id="continuePartialRun" hidden disabled>Continue with healthy departments</button>
+        <button type="button" id="continuePartialRun" hidden disabled>Continue with healthy employees and departments</button>
       </section>
       <section class="panel" id="panel-decisions" data-panel="decisions" hidden>
         <h2>Holiday decisions</h2>
-        <label><input id="holidayApplies" type="checkbox"> This holiday applies</label>
+        <label>Holiday date <select id="holidayDate"><option value="">No holiday date in this period</option></select></label>
+        <label><input id="holidayApplies" type="checkbox"> Approve worked holiday for this date</label>
         <label>Search employees <input id="employeeSearch" type="search" autocomplete="off"></label>
         <div class="bulk-actions"><button type="button" id="selectAllSurvey">Select All Survey</button><button type="button" id="selectAllReservations">Select All Reservations</button></div>
         <div id="employeeList" class="employee-list"></div>
@@ -46,9 +48,9 @@
       </section>
       <section class="panel" id="panel-draft" data-panel="draft" hidden>
         <h2>Draft</h2><p>Changed amounts require a reason. Original and edited values are shown together.</p>
-        <div id="draftRows"></div><button type="button" id="calculateDraft">Calculate draft</button><button type="button" id="saveDraftEdits">Save edits</button>
+        <div id="draftOmissionDetails" class="errors" hidden></div><div id="draftRows"></div><button type="button" id="calculateDraft">Calculate draft</button><button type="button" id="saveDraftEdits">Save edits</button>
       </section>
-      <section class="panel" id="panel-approve" data-panel="approve" hidden><h2>Approve</h2><div id="approvalSummary"></div><button type="button" id="approveRun" disabled>Approve payroll</button></section>
+      <section class="panel" id="panel-approve" data-panel="approve" hidden><h2>Approve</h2><div id="approvalSummary"></div><button type="button" id="approveRun" disabled>Approve payroll</button><button type="button" id="retryApproval" hidden>Retry approval</button></section>
     </main>
     <?!= include('SidebarScripts'); ?>
   </body>

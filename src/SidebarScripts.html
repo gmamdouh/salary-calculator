@@ -49,7 +49,7 @@
   })();
   var PayrollSidebarPartialRunNotice = (function () {
     function create() {
-      var failedDepartments = [], departmentErrors = [], fingerprint = null, acknowledgedFingerprint = null;
+      var failedDepartments = [], departmentErrors = [], failedEmployees = [], employeeErrors = [], fingerprint = null, acknowledgedFingerprint = null;
       function detailsFor(department) {
         return departmentErrors.filter(function (item) { return item.department === department; })
           .map(function (item) { return item.message || item.code || 'Department validation failed'; });
@@ -59,6 +59,8 @@
           report = report || {};
           failedDepartments = (report.failedDepartments || []).slice();
           departmentErrors = (report.departmentErrors || []).slice();
+          failedEmployees = (report.failedEmployees || []).slice();
+          employeeErrors = (report.employeeErrors || []).slice();
           fingerprint = report.partialDepartmentsFingerprint || null;
           acknowledgedFingerprint = null;
         },
@@ -66,23 +68,113 @@
           var details = failedDepartments.map(function (department) {
             var reasons = detailsFor(department);
             return department + ' omitted — ' + (reasons.length ? reasons.join('; ') : 'Department validation failed') + '.';
-          }).join('\n');
+          }).concat(failedEmployees.map(function (employee) {
+            var reasons = employeeErrors.filter(function (item) { return item.employeeId === employee.employeeId; })
+              .map(function (item) { return item.message || item.code || 'Employee validation failed'; });
+            return employee.department + ' employee ' + employee.employeeId + ' omitted — ' +
+              (reasons.length ? reasons.join('; ') : 'Employee validation failed') + '.';
+          })).join('\n');
           return details ? 'Partial payroll: ' + details : '';
         },
-        isRequired: function () { return failedDepartments.length > 0; },
+        isRequired: function () { return failedDepartments.length > 0 || failedEmployees.length > 0; },
         setAcknowledged: function (value) { acknowledgedFingerprint = value === true ? fingerprint : null; },
-        canContinue: function () { return !failedDepartments.length || !!fingerprint && acknowledgedFingerprint === fingerprint; },
+        canContinue: function () { return !(failedDepartments.length || failedEmployees.length) || !!fingerprint && acknowledgedFingerprint === fingerprint; },
         acknowledgements: function () { return { partialDepartmentsFingerprint: acknowledgedFingerprint }; }
       };
     }
     return { create: create };
   })();
+  var PayrollSidebarHolidayDecisions = (function () {
+    function create() {
+      var dates = [], activeKey = null;
+      function active() { return dates.find(function (entry) { return entry.key === activeKey; }) || null; }
+      return {
+        setCalendar: function (holidays, month, cutoff) {
+          dates = [];
+          (holidays || []).forEach(function (holiday) {
+            (holiday.actualHolidayDates || []).forEach(function (date) {
+              if (date.slice(0, 7) !== month || cutoff && date > cutoff) return;
+              dates.push({ key: holiday.holidayId + '|' + date, holidayId: holiday.holidayId,
+                name: holiday.name || holiday.holidayId, date: date, applies: false, selected: {} });
+            });
+          });
+          dates.sort(function (left, right) { return left.date.localeCompare(right.date); });
+          activeKey = dates.length ? dates[0].key : null;
+        },
+        list: function () { return dates.map(function (entry) { return { key: entry.key, name: entry.name, date: entry.date }; }); },
+        selectDate: function (key) { activeKey = dates.some(function (entry) { return entry.key === key; }) ? key : null; },
+        active: active,
+        setApplies: function (value) { var entry = active(); if (entry) entry.applies = value === true; },
+        selectEmployee: function (id, value) { var entry = active(); if (entry) entry.selected[id] = value === true; },
+        selectedIds: function () { var entry = active(); return entry ? Object.keys(entry.selected).filter(function (id) { return entry.selected[id]; }) : []; },
+        bulk: function (department, employees) {
+          if (department !== 'SURVEY' && department !== 'RESERVATIONS') return;
+          (employees || []).filter(function (employee) { return employee.department === department; })
+            .forEach(function (employee) { this.selectEmployee(employee.employeeId, true); }, this);
+        },
+        retainEmployees: function (ids) {
+          dates.forEach(function (entry) {
+            Object.keys(entry.selected).forEach(function (id) { if (ids.indexOf(id) === -1) delete entry.selected[id]; });
+          });
+        },
+        payload: function () { return dates.map(function (entry) { return { holidayId: entry.holidayId, date: entry.date,
+          applies: entry.applies, employeeIds: entry.applies ? Object.keys(entry.selected).filter(function (id) { return entry.selected[id]; }) : [] }; }); }
+      };
+    }
+    return { create: create };
+  })();
+  function PayrollSidebarDefaultMonth(today) {
+    var previous = new Date(today.getTime());
+    previous.setDate(1);
+    previous.setMonth(previous.getMonth() - 1);
+    return previous.getFullYear() + '-' + String(previous.getMonth() + 1).padStart(2, '0');
+  }
+  var PayrollSidebarDraftGate = (function () {
+    function create() {
+      var runId = null, ready = false, dirty = false, saving = false, approving = false, frozen = false, retryable = false;
+      return {
+        load: function (draft) {
+          if (!draft || draft.valid === false || !draft.runId) {
+            runId = null; ready = false; dirty = false; saving = false; approving = false; frozen = false; retryable = false;
+            return;
+          }
+          runId = draft.runId; dirty = false; saving = false; approving = false;
+          frozen = !!draft.retryableApproval || draft.state === 'APPROVED';
+          retryable = !!draft.retryableApproval;
+          ready = draft.state === 'DRAFT' && !frozen;
+        },
+        markDirty: function () { dirty = true; },
+        beginSave: function () { saving = true; dirty = true; },
+        saveFailed: function () { saving = false; dirty = true; },
+        beginApproval: function () { approving = true; },
+        approvalFailed: function (canRetry) { approving = false; if (canRetry) { frozen = true; retryable = true; } else ready = false; },
+        approvalSucceeded: function () { approving = false; frozen = true; retryable = false; ready = false; },
+        canApprove: function () { return ready && !dirty && !saving && !approving && !frozen; },
+        canRetry: function () { return retryable && !approving; },
+        isFrozen: function () { return frozen; },
+        isSaving: function () { return saving; },
+        runId: function () { return runId; }
+      };
+    }
+    return { create: create };
+  })();
+  function PayrollSidebarApprovalRetryable(result, saved) {
+    var blockingCodes = ['ACK_REQUIRED', 'OCR_UNRESOLVED', 'APPROVER_CONFIGURATION_MISSING',
+      'APPROVER_NOT_AUTHORIZED', 'VALIDATION_REQUIRED'];
+    if (result && (result.errors || []).concat(result.blockingErrors || []).some(function (item) {
+      return blockingCodes.indexOf(item.code) !== -1;
+    })) return false;
+    return !!(result && (result.resumable || result.writeBackStatus === 'FAILED')) ||
+      !!(saved && saved.valid && saved.retryableApproval);
+  }
 </script>
 <script>
   (function () {
-    var ocrAttempts = PayrollSidebarOcrAttemptTracker.create();
+    var holidayDecisions = PayrollSidebarHolidayDecisions.create();
+    var ocrAttemptsByDate = {}, ocrAttempts = PayrollSidebarOcrAttemptTracker.create();
     var partialRunNotice = PayrollSidebarPartialRunNotice.create();
-    var state = { setup: null, validation: null, employees: [], selected: {}, employeeDecisions: {},
+    var draftGate = PayrollSidebarDraftGate.create();
+    var state = { setup: null, validation: null, employees: [], employeeDecisions: {},
       confirmedOcrIds: [], evidenceIds: [], decisions: null, draft: null, blockingErrors: [], unresolvedDecisions: 0,
       validationUnresolvedCount: 0 };
     var byId = function (id) { return document.getElementById(id); };
@@ -93,21 +185,36 @@
     function clearError() { var box = byId('errors'); box.hidden = true; box.textContent = ''; }
     function setStatus(message) { byId('status').textContent = message || ''; }
     function renderHolidays() {
-      var selector = byId('holidayId'), month = byId('payrollMonth').value;
+      var selector = byId('holidayDate'), month = byId('payrollMonth').value;
+      var cutoff = state.validation && state.validation.payrollMonth === month ? state.validation.cutoff : null;
+      holidayDecisions.setCalendar(state.setup && state.setup.holidays || [], month, cutoff);
+      ocrAttemptsByDate = {};
       selector.textContent = '';
-      var empty = document.createElement('option'); empty.value = ''; empty.textContent = 'Choose a holiday when one applies'; selector.appendChild(empty);
-      (state.setup && state.setup.holidays || []).filter(function (holiday) {
-        return (holiday.actualHolidayDates || []).some(function (date) { return date.slice(0, 7) === month; });
-      }).forEach(function (holiday) {
-        var option = document.createElement('option'); option.value = holiday.holidayId;
-        option.textContent = holiday.name + ' · ' + holiday.actualHolidayDates.join(', ');
+      holidayDecisions.list().forEach(function (holiday) {
+        var option = document.createElement('option'); option.value = holiday.key;
+        option.textContent = holiday.name + ' · ' + holiday.date;
         selector.appendChild(option);
       });
+      if (!holidayDecisions.list().length) {
+        var empty = document.createElement('option'); empty.value = ''; empty.textContent = 'No holiday date in this period'; selector.appendChild(empty);
+      }
+      selector.value = holidayDecisions.active() ? holidayDecisions.active().key : '';
+      chooseHolidayDate();
+    }
+    function chooseHolidayDate() {
+      holidayDecisions.selectDate(byId('holidayDate').value);
+      var active = holidayDecisions.active();
+      byId('holidayApplies').checked = !!(active && active.applies);
+      byId('holidayApplies').disabled = !active;
+      ocrAttempts = active && ocrAttemptsByDate[active.key] || PayrollSidebarOcrAttemptTracker.create();
+      if (active && !ocrAttemptsByDate[active.key]) ocrAttemptsByDate[active.key] = ocrAttempts;
+      renderEmployees(); renderMatchAttempts();
     }
     function invokeServer(name, value) {
       return new Promise(function (resolve, reject) {
         var runner = google.script.run.withSuccessHandler(resolve).withFailureHandler(function (error) { reject(error); });
         if (name === 'getRunSetup') runner.getRunSetup();
+        else if (name === 'getRunState') { if (value == null) runner.getRunState(); else runner.getRunState(value); }
         else if (name === 'validateRun') runner.validateRun(value);
         else if (name === 'calculateDraft') runner.calculateDraft(value);
         else if (name === 'saveOverride') runner.saveOverride(value);
@@ -126,13 +233,18 @@
       var search = byId('employeeSearch').value.trim().toLowerCase(), container = byId('employeeList'); container.textContent = '';
       state.employees.filter(function (employee) { return !search || employee.americanName.toLowerCase().indexOf(search) !== -1; }).forEach(function (employee) {
         var label = document.createElement('label'); label.className = 'employee-option';
-        var checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.checked = !!state.selected[employee.employeeId];
-        checkbox.addEventListener('change', function () { state.selected[employee.employeeId] = checkbox.checked; refreshApproval(); updateManualResolveButtons(); });
-        label.appendChild(checkbox); label.appendChild(document.createTextNode(employee.americanName + ' · ' + employee.department)); container.appendChild(label);
+        var checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.checked = selectedIds().indexOf(employee.employeeId) !== -1;
+        checkbox.disabled = !holidayDecisions.active();
+        checkbox.addEventListener('change', function () { holidayDecisions.selectEmployee(employee.employeeId, checkbox.checked); refreshApproval(); updateManualResolveButtons(); });
+        label.appendChild(checkbox); label.appendChild(document.createTextNode(employee.americanName + ' · ' + employee.department));
+        if (employee.passedProbation === true) {
+          var badge = document.createElement('span'); badge.className = 'passed-probation'; badge.textContent = 'Passed Probation'; label.appendChild(badge);
+        }
+        container.appendChild(label);
       });
     }
     function selectDepartment(department) {
-      state.employees.filter(function (employee) { return employee.department === department; }).forEach(function (employee) { state.selected[employee.employeeId] = true; });
+      holidayDecisions.bulk(department, state.employees);
       renderEmployees(); updateManualResolveButtons();
     }
     function renderEligibilityDecisions(requirements) {
@@ -199,24 +311,31 @@
       });
       updateUnresolved(); refreshApproval();
     }
-    function updateUnresolved() { state.unresolvedDecisions = state.validationUnresolvedCount + ocrAttempts.unresolvedCount(); }
-    function selectedIds() { return Object.keys(state.selected).filter(function (id) { return state.selected[id]; }); }
+    function updateUnresolved() {
+      state.unresolvedDecisions = state.validationUnresolvedCount + Object.keys(ocrAttemptsByDate).reduce(function (total, key) {
+        return total + ocrAttemptsByDate[key].unresolvedCount();
+      }, 0);
+    }
+    function selectedIds() { return holidayDecisions.selectedIds(); }
     function updateManualResolveButtons() {
       document.querySelectorAll('[data-resolve-attempt]').forEach(function (button) { button.disabled = !selectedIds().length; });
     }
     function addConfirmedIds(ids) {
       ids.forEach(function (id) {
-        state.selected[id] = true;
+        holidayDecisions.selectEmployee(id, true);
         if (state.confirmedOcrIds.indexOf(id) === -1) state.confirmedOcrIds.push(id);
       });
     }
     function recordFailedAttempt() { showMatches({ matches: [], ambiguous: [], unmatched: [{ status: 'ERROR' }] }); }
     function decisionPayload() {
-      return { holidayWork: { holidayId: byId('holidayId').value, applies: byId('holidayApplies').checked,
-        employeeIds: selectedIds(), evidenceIds: state.evidenceIds },
+      return { holidayWork: { dates: holidayDecisions.payload(), evidenceIds: state.evidenceIds },
         employeeDecisions: state.employeeDecisions,
         ocr: { unresolvedCount: state.unresolvedDecisions, confirmedEmployeeIds: state.confirmedOcrIds,
-          attempts: ocrAttempts.attempts() } };
+          attempts: Object.keys(ocrAttemptsByDate).reduce(function (all, key) {
+            return all.concat(ocrAttemptsByDate[key].attempts().map(function (attempt) {
+              attempt.holidayDate = key; return attempt;
+            }));
+          }, []) } };
     }
     function missingOverrideReasons() {
       return Array.prototype.some.call(document.querySelectorAll('[data-amount]'), function (input) {
@@ -225,34 +344,57 @@
       });
     }
     function canApprove() { return !state.blockingErrors.length && state.unresolvedDecisions === 0 && !missingOverrideReasons() &&
-      partialRunNotice.canContinue() && !!state.draft; }
-    function refreshApproval() { var button = byId('approveRun'); if (button) button.disabled = !canApprove(); }
+      partialRunNotice.canContinue() && draftGate.canApprove(); }
+    function refreshApproval() {
+      byId('approveRun').disabled = !canApprove();
+      byId('retryApproval').hidden = !draftGate.canRetry();
+      byId('retryApproval').disabled = !draftGate.canRetry();
+    }
+    function renderOmissionNotice() {
+      var message = partialRunNotice.message(), required = partialRunNotice.isRequired();
+      byId('partialDepartmentDetails').textContent = message;
+      byId('partialDepartmentDetails').hidden = !required;
+      byId('partialDepartmentAckLabel').hidden = !required;
+      byId('partialDepartmentAck').checked = required && partialRunNotice.canContinue();
+      byId('continuePartialRun').hidden = !required;
+      byId('continuePartialRun').disabled = !partialRunNotice.canContinue();
+      byId('draftOmissionDetails').hidden = !required;
+      byId('draftOmissionDetails').textContent = message;
+    }
     function renderApprovalSummary(message) {
       var summary = byId('approvalSummary');
-      summary.textContent = (partialRunNotice.message() ? 'Partial payroll — omitted departments:\n' +
+      summary.textContent = (draftGate.runId() ? 'Run ' + draftGate.runId() + '\n' : '') +
+        (partialRunNotice.message() ? 'Partial payroll — omitted departments and employees:\n' +
         partialRunNotice.message() + '\n\n' : '') + message;
       summary.style.whiteSpace = 'pre-line';
     }
     function renderDraft(result) {
       if (result && result.errors && result.errors.some(function (item) { return item.code === 'ACK_REQUIRED'; })) {
         partialRunNotice.setReport(result);
+        state.validation = Object.assign({}, state.validation || {}, { runId: result.runId || state.validation && state.validation.runId });
         if (Array.isArray(result.employees)) {
           state.employees = result.employees;
-          var currentEmployeeIds = Object.create(null);
-          state.employees.forEach(function (employee) { currentEmployeeIds[employee.employeeId] = true; });
-          Object.keys(state.selected).forEach(function (employeeId) {
-            if (!currentEmployeeIds[employeeId]) delete state.selected[employeeId];
-          });
+          holidayDecisions.retainEmployees(state.employees.map(function (employee) { return employee.employeeId; }));
         }
-        byId('partialDepartmentDetails').textContent = partialRunNotice.message();
-        byId('partialDepartmentAckLabel').hidden = !partialRunNotice.isRequired();
-        byId('partialDepartmentAck').checked = false;
-        byId('continuePartialRun').hidden = !partialRunNotice.isRequired();
-        byId('continuePartialRun').disabled = partialRunNotice.isRequired();
-        byId('validationSummary').textContent = 'Department failures changed; review and acknowledge the updated report before continuing.';
-        state.draft = null; state.blockingErrors = []; goTo('validate'); refreshApproval(); return;
+        renderOmissionNotice();
+        byId('validationSummary').textContent = 'Omissions changed; review and acknowledge the updated report before continuing.';
+        state.draft = null; state.blockingErrors = []; draftGate.load(null);
+        byId('calculateDraft').disabled = false; goTo('validate'); refreshApproval(); return;
       }
-      state.draft = result; state.blockingErrors = result && (result.errors || result.blockingErrors) || [];
+      if (!result || result.valid === false) {
+        state.draft = null;
+        state.blockingErrors = result && (result.errors || result.blockingErrors) || [{ message: 'Draft calculation failed.' }];
+        draftGate.load(null); byId('calculateDraft').disabled = false;
+        showError(state.blockingErrors); refreshApproval(); return;
+      }
+      state.draft = result; state.blockingErrors = result.blockingErrors || result.errors || [];
+      partialRunNotice.setReport(result);
+      if (result.acknowledgements && result.acknowledgements.partialDepartmentsFingerprint === result.partialDepartmentsFingerprint)
+        partialRunNotice.setAcknowledged(true);
+      renderOmissionNotice();
+      draftGate.load(result);
+      byId('resumeRunId').value = result.runId;
+      byId('calculateDraft').disabled = true;
       var container = byId('draftRows'); container.textContent = '';
       if (state.blockingErrors.length) showError(state.blockingErrors);
       (result && result.results || []).forEach(function (employee) {
@@ -262,38 +404,72 @@
           row.innerHTML = '<strong></strong><div class="draft-grid"><label>Original calculated amount <input readonly></label><label>Edited amount <input data-amount></label></div><label>Reason for change <input data-reason></label>';
           row.querySelector('strong').textContent = employee.americanName + ' · ' + component;
           var inputs = row.querySelectorAll('input'); inputs[0].value = String(original); inputs[1].value = String(item.amount);
-          inputs[1].dataset.original = String(original); inputs[1].dataset.reasonId = 'reason-' + employee.employeeId + '-' + component;
-          inputs[2].id = inputs[1].dataset.reasonId; inputs[1].addEventListener('input', refreshApproval); inputs[2].addEventListener('input', refreshApproval);
+          inputs[1].dataset.original = String(original); inputs[1].dataset.persisted = String(item.amount);
+          inputs[1].dataset.reasonId = 'reason-' + employee.employeeId + '-' + component;
+          inputs[2].id = inputs[1].dataset.reasonId; inputs[2].value = item.override && item.override.reason || '';
+          inputs[2].dataset.persistedReason = inputs[2].value;
+          inputs[1].addEventListener('input', function () { draftGate.markDirty(); refreshApproval(); });
+          inputs[2].addEventListener('input', function () { draftGate.markDirty(); refreshApproval(); });
           container.appendChild(row);
         });
+        var total = document.createElement('div'); total.className = 'draft-total';
+        total.textContent = employee.americanName + ' total: ' + String(employee.total); container.appendChild(total);
       });
-      if (result && result.valid !== false) renderApprovalSummary('Draft is ready for review.');
+      renderApprovalSummary(result.retryableApproval ? 'Approval is frozen after a recoverable failure. Retry the same run.' :
+        'Draft is ready for review.');
       refreshApproval();
     }
     byId('loadSetup').addEventListener('click', function () {
       clearError(); setStatus('Loading setup…');
       invokeServer('getRunSetup').then(function (setup) {
-        state.setup = setup || {}; var previous = new Date(); previous.setMonth(previous.getMonth() - 1);
-        byId('payrollMonth').value = setup.payrollMonth || previous.toISOString().slice(0, 7);
+        if (!setup || setup.valid === false) { showError(setup && setup.errors || 'Setup could not be loaded.'); setStatus(''); return; }
+        state.setup = setup;
+        byId('payrollMonth').value = setup.payrollMonth || PayrollSidebarDefaultMonth(new Date());
         state.employees = setup.employees || []; renderHolidays(); goTo('validate'); setStatus('Setup loaded.');
       }).catch(function (error) { showError(error.message || error); setStatus(''); });
     });
     byId('payrollMonth').addEventListener('change', renderHolidays);
+    byId('holidayDate').addEventListener('change', chooseHolidayDate);
+    byId('holidayApplies').addEventListener('change', function () { holidayDecisions.setApplies(byId('holidayApplies').checked); });
+    byId('resumeRun').addEventListener('click', function () {
+      clearError(); setStatus('Loading saved run…');
+      var requestedId = byId('resumeRunId').value.trim();
+      invokeServer('getRunState', requestedId ? { runId: requestedId } : null).then(function (run) {
+        if (!run || run.valid === false) { showError(run && run.errors || 'Saved run was not found.'); setStatus(''); return; }
+        byId('resumeRunId').value = run.runId;
+        byId('payrollMonth').value = run.payrollMonth;
+        byId('cutoffMode').value = run.cutoffMode || 'MONTH_END';
+        byId('department').value = run.departmentScope && run.departmentScope[0] || 'ALL';
+        state.validation = { runId: run.runId, cutoff: run.cutoff };
+        state.employees = (run.results || []).map(function (item) { return { employeeId: item.employeeId,
+          americanName: item.americanName, department: item.department }; });
+        renderDraft(run);
+        if (run.state === 'APPROVED' && !run.retryableApproval) renderApprovalSummary('Payroll approved.');
+        goTo(run.retryableApproval || run.state === 'APPROVED' ? 'approve' : 'draft');
+        setStatus('Run ' + run.runId + ' loaded.');
+      }).catch(function (error) { showError(error.message || error); setStatus(''); });
+    });
+    invokeServer('getRunState').then(function (run) {
+      if (run && run.valid && run.runId) {
+        byId('resumeRunId').value = run.runId;
+        setStatus('Saved run ' + run.runId + ' is available to resume.');
+      }
+    }).catch(function () {});
     byId('validateRun').addEventListener('click', function () {
+      if (draftGate.isFrozen()) { showError('This run is frozen. Retry its approval from the Approve step.'); return; }
       clearError(); setStatus('Validating sources…');
       var request = { payrollMonth: byId('payrollMonth').value, cutoffMode: byId('cutoffMode').value, departmentScope: [byId('department').value] };
       invokeServer('validateRun', request).then(function (result) {
+        if (!result) { showError('Validation returned no report.'); setStatus(''); return; }
         state.validation = result || {}; state.employees = result.employees || state.employees;
+        state.draft = null; draftGate.load(null); byId('calculateDraft').disabled = false;
         state.blockingErrors = result.errors || result.blockingErrors || [];
         partialRunNotice.setReport(result);
-        byId('partialDepartmentDetails').textContent = partialRunNotice.message();
-        byId('partialDepartmentAckLabel').hidden = !partialRunNotice.isRequired();
-        byId('partialDepartmentAck').checked = false;
-        byId('continuePartialRun').hidden = !partialRunNotice.isRequired();
-        byId('continuePartialRun').disabled = partialRunNotice.isRequired();
+        renderOmissionNotice();
+        renderHolidays();
         renderEligibilityDecisions(result.decisionRequirements || []);
         byId('validationSummary').textContent = state.blockingErrors.length ? 'Blocking validation errors: ' + state.blockingErrors.length :
-          (partialRunNotice.isRequired() ? 'Some departments failed; review the omitted departments below.' : 'Sources validated.');
+          (partialRunNotice.isRequired() ? 'Review every omitted department and employee below.' : 'Sources validated.');
         if (state.blockingErrors.length) showError(state.blockingErrors);
         else if (!partialRunNotice.isRequired()) { renderEmployees(); goTo('decisions'); }
         setStatus('');
@@ -312,22 +488,27 @@
     byId('selectAllSurvey').addEventListener('click', function () { selectDepartment('SURVEY'); });
     byId('selectAllReservations').addEventListener('click', function () { selectDepartment('RESERVATIONS'); });
     byId('matchPastedNames').addEventListener('click', function () {
+      if (!holidayDecisions.active()) { showError('Choose a holiday date before matching names.'); return; }
       clearError(); invokeServer('matchHolidayNames', { text: byId('pastedNames').value,
         runId: state.validation && state.validation.runId }).then(function (report) {
+        if (!report || report.valid === false) { showError(report && report.errors || 'Name matching failed.'); recordFailedAttempt(); return; }
         if (report && report.evidenceId) state.evidenceIds.push(report.evidenceId);
         showMatches(report, report && report.evidenceId);
       })
         .catch(function (error) { showError(error.message || error); recordFailedAttempt(); });
     });
     byId('uploadScreenshot').addEventListener('click', function () {
+      if (!holidayDecisions.active()) { showError('Choose a holiday date before uploading a screenshot.'); return; }
       clearError(); var file = byId('holidayScreenshot').files[0];
       if (!file) { showError('Choose a screenshot first.'); return; }
       setStatus('Storing original screenshot and running OCR…');
       var reader = new FileReader(); reader.onload = function () {
         invokeServer('processHolidayScreenshot', { runId: state.validation && state.validation.runId,
           imageData: reader.result, fileName: file.name, contentType: file.type }).then(function (result) {
+          if (!result) { showError('Screenshot processing failed.'); recordFailedAttempt(); setStatus(''); return; }
           if (result.evidence && result.evidence.evidenceId) state.evidenceIds.push(result.evidence.evidenceId);
           if (result.auditEvidence && result.auditEvidence.evidenceId) state.evidenceIds.push(result.auditEvidence.evidenceId);
+          if (result.valid === false) showError(result.errors || 'Screenshot OCR failed.');
           showMatches(result.matchReport, result.evidence && result.evidence.evidenceId); setStatus('');
         }).catch(function (error) { showError(error.message || error); recordFailedAttempt(); setStatus(''); });
       }; reader.onerror = function () { showError('The screenshot could not be read.'); recordFailedAttempt(); };
@@ -347,38 +528,96 @@
       }
     });
     byId('saveDecisions').addEventListener('click', function () {
+      if (draftGate.isFrozen()) { showError('This run is frozen. Retry its approval from the Approve step.'); return; }
       if (state.unresolvedDecisions || state.blockingErrors.length) { showError('Resolve blocking validation and OCR issues before continuing.'); return; }
       if (!partialRunNotice.canContinue()) { showError('Review and acknowledge the omitted departments before continuing.'); return; }
       state.decisions = decisionPayload(); goTo('draft');
     });
     byId('calculateDraft').addEventListener('click', function () {
+      if (draftGate.isFrozen()) { showError('This run is frozen. Retry approval from the Approve step.'); return; }
+      if (state.draft) { showError('This draft already exists. Save edits or approve the saved run.'); return; }
       clearError(); var request = { payrollMonth: byId('payrollMonth').value, cutoffMode: byId('cutoffMode').value,
         departmentScope: [byId('department').value], runId: state.validation && state.validation.runId, decisions: state.decisions,
         acknowledgements: partialRunNotice.acknowledgements() };
-      invokeServer('calculateDraft', request).then(renderDraft).catch(function (error) { showError(error.message || error); });
+      invokeServer('calculateDraft', request).then(renderDraft).catch(function (error) { draftGate.load(null); showError(error.message || error); refreshApproval(); });
     });
     byId('saveDraftEdits').addEventListener('click', function () {
-      clearError(); var changed = Array.prototype.filter.call(document.querySelectorAll('[data-amount]'), function (input) { return Number(input.value) !== Number(input.dataset.original); });
+      if (!state.draft || draftGate.isFrozen() || draftGate.isSaving()) { showError('An editable draft is required.'); return; }
+      clearError(); var changed = Array.prototype.filter.call(document.querySelectorAll('[data-amount]'), function (input) {
+        var reason = byId(input.dataset.reasonId);
+        return Number(input.value) !== Number(input.dataset.persisted) || reason.value.trim() !== reason.dataset.persistedReason;
+      });
       if (changed.some(function (input) { return !byId(input.dataset.reasonId).value.trim(); })) { showError('Enter a reason for every changed amount.'); return; }
+      var desiredChanges = changed.map(function (input) { var row = input.closest('.draft-row'); return {
+        employeeId: row.dataset.employeeId, component: row.dataset.component, value: input.value,
+        reason: byId(input.dataset.reasonId).value.trim() }; });
+      draftGate.beginSave(); refreshApproval();
+      document.querySelectorAll('[data-amount], [data-reason]').forEach(function (input) { input.disabled = true; });
+      byId('saveDraftEdits').disabled = true;
       var chain = Promise.resolve();
       changed.forEach(function (input) { chain = chain.then(function () {
         var row = input.closest('.draft-row');
         return invokeServer('saveOverride', { runId: state.draft.runId, employeeId: row.dataset.employeeId,
-          component: row.dataset.component, value: Number(input.value), reason: byId(input.dataset.reasonId).value.trim() });
+          component: row.dataset.component, value: Number(input.value), reason: byId(input.dataset.reasonId).value.trim() }).then(function (result) {
+            if (!result || result.valid === false) throw result && result.errors || new Error('Override could not be saved.');
+          });
       }); });
-      chain.then(function () { goTo('approve'); renderApprovalSummary('Draft is ready for review.'); refreshApproval(); })
-        .catch(function (error) { showError(error.message || error); });
+      chain.then(function () { return invokeServer('getRunState', { runId: state.draft.runId }); })
+        .then(function (saved) {
+          if (!saved || saved.valid === false) throw saved && saved.errors || new Error('Saved draft could not be reloaded.');
+          renderDraft(saved); goTo('approve');
+        }).catch(function (error) {
+          return invokeServer('getRunState', { runId: state.draft.runId }).then(function (saved) {
+            if (!saved || saved.valid === false) { draftGate.saveFailed(); return; }
+            renderDraft(saved); goTo('draft');
+            desiredChanges.forEach(function (change) {
+              document.querySelectorAll('.draft-row').forEach(function (row) {
+                if (row.dataset.employeeId !== change.employeeId || row.dataset.component !== change.component) return;
+                row.querySelector('[data-amount]').value = change.value;
+                row.querySelector('[data-reason]').value = change.reason;
+              });
+            });
+            draftGate.markDirty();
+          }).catch(function () { draftGate.saveFailed(); }).then(function () {
+            showError(error.message || error); refreshApproval();
+          });
+        })
+        .finally(function () {
+          document.querySelectorAll('[data-amount], [data-reason]').forEach(function (input) { input.disabled = false; });
+          byId('saveDraftEdits').disabled = false;
+        });
     });
-    byId('approveRun').addEventListener('click', function () {
-      if (!canApprove()) { showError('Resolve blocking errors and missing override reasons before approval.'); return; }
-      invokeServer('approveRun', state.draft.runId).then(function (result) {
-        if (result && (result.valid === false || result.blockingErrors && result.blockingErrors.length)) {
-          state.blockingErrors = result.blockingErrors || result.errors || [{ message: 'Approval was blocked.' }]; showError(state.blockingErrors); return;
+    function submitApproval(retry) {
+      if (retry ? !draftGate.canRetry() : !canApprove()) {
+        showError('Resolve blocking errors and save all draft edits before approval.'); return;
+      }
+      clearError(); draftGate.beginApproval(); refreshApproval();
+      var runId = draftGate.runId();
+      invokeServer('approveRun', runId).then(function (result) {
+        if (result && result.valid === true && result.state === 'APPROVED') {
+          draftGate.approvalSucceeded(); renderApprovalSummary('Payroll approved.'); refreshApproval(); return;
         }
-        byId('approvalSummary').textContent = 'Payroll approved.'; byId('approveRun').disabled = true;
-      })
-        .catch(function (error) { showError(error.message || error); });
-    });
+        return invokeServer('getRunState', { runId: runId }).catch(function () { return null; }).then(function (saved) {
+          var retryable = PayrollSidebarApprovalRetryable(result, saved);
+          draftGate.approvalFailed(retryable);
+          state.blockingErrors = result && (result.blockingErrors || result.errors) || [{ message: 'Approval failed.' }];
+          showError(state.blockingErrors);
+          renderApprovalSummary(retryable ? 'Approval stopped during a recoverable write. Retry this saved run.' :
+            'Approval is blocked. Review the reported input errors.');
+          refreshApproval();
+        });
+      }).catch(function (error) {
+        invokeServer('getRunState', { runId: runId }).then(function (saved) {
+          var retryable = !!(saved && saved.valid && saved.retryableApproval);
+          draftGate.approvalFailed(retryable);
+          showError(error.message || error);
+          renderApprovalSummary(retryable ? 'Approval stopped during a recoverable write. Retry this saved run.' : 'Approval failed.');
+          refreshApproval();
+        }).catch(function () { draftGate.approvalFailed(false); showError(error.message || error); refreshApproval(); });
+      });
+    }
+    byId('approveRun').addEventListener('click', function () { submitApproval(false); });
+    byId('retryApproval').addEventListener('click', function () { submitApproval(true); });
     document.querySelectorAll('[data-step]').forEach(function (button) { button.addEventListener('click', function () { goTo(button.dataset.step); }); });
   })();
 </script>

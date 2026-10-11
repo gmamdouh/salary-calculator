@@ -56,6 +56,16 @@ SalaryCalculator.MenuAndApi = (function () {
       try { return action(); }
       catch (error) { return { valid: false, errors: error.issues || [issue(error.code || 'PAYROLL_ACTION_FAILED', error.message || 'Payroll action failed.')] }; }
     }
+    function sidebarEmployees(report) {
+      var byId = Object.create(null), cutoff = report.period && report.period.endDate || report.cutoff;
+      (report.inputs || []).forEach(function (item) { byId[item.employeeId] = item; });
+      return (report.employees || []).map(function (employee) {
+        var input = byId[employee.employeeId], joined = input && input.firstWorkingDay;
+        var day91 = joined && Date.parse(joined + 'T00:00:00Z') + 90 * 86400000;
+        return { employeeId: employee.employeeId, americanName: employee.americanName, department: employee.department,
+          passedProbation: !!(day91 && cutoff && Date.parse(cutoff + 'T00:00:00Z') >= day91) };
+      });
+    }
     function matchHolidayNames(request) {
       return guarded(function () {
         var text = typeof request === 'string' ? request : String(request && request.text || '');
@@ -106,9 +116,14 @@ SalaryCalculator.MenuAndApi = (function () {
         request = request || {};
         var result = orchestrator.calculateDraft(request);
         if (!result || result.valid === false) return result || { valid: false, errors: [issue('DRAFT_FAILED', 'The draft could not be calculated.')] };
+        if (result.runId && dependencies.rememberRunId) {
+          try { dependencies.rememberRunId(result.runId); }
+          catch (error) { /* The saved run is still available by its explicit ID. */ }
+        }
         return { valid: true, runId: result.runId, state: result.state, payrollMonth: result.payrollMonth,
           cutoff: result.cutoff, results: result.results, errors: result.errors || [], blockingErrors: result.blockingErrors || [],
           failedDepartments: result.failedDepartments || [], departmentErrors: result.departmentErrors || [],
+          failedEmployees: result.failedEmployees || [], employeeErrors: result.employeeErrors || [],
           partialDepartmentsFingerprint: result.partialDepartmentsFingerprint || null,
           acknowledgements: result.acknowledgements || {}, warnings: result.warnings || [] };
       });
@@ -129,8 +144,9 @@ SalaryCalculator.MenuAndApi = (function () {
             dependencies.saveValidationEmployees(result.runId, result.employees || []);
           }
           return { valid: result.valid, runId: result.runId, payrollMonth: result.payrollMonth,
-            cutoff: result.period && result.period.endDate, employees: result.employees || [],
-            errors: result.valid ? [] : result.errors || [], departmentErrors: result.valid ? result.errors || [] : [],
+            cutoff: result.period && result.period.endDate, employees: sidebarEmployees(result),
+            errors: result.valid ? [] : result.errors || [], departmentErrors: result.departmentErrors || [],
+            failedEmployees: result.failedEmployees || [], employeeErrors: result.employeeErrors || [],
             failedDepartments: result.failedDepartments || [], partialDepartmentsFingerprint: result.partialDepartmentsFingerprint || null,
             warnings: result.warnings || [],
             unresolvedDecisionCount: result.unresolvedDecisionCount || 0,
@@ -138,6 +154,23 @@ SalaryCalculator.MenuAndApi = (function () {
         });
       },
       calculateDraft: calculateDraft,
+      getRunState: function (request) {
+        return guarded(function () {
+          var id = typeof request === 'string' ? request : request && request.runId ||
+            (dependencies.getLastRunId && dependencies.getLastRunId());
+          if (!id) return { valid: false, errors: [issue('NO_RUN', 'No previous payroll run was found.')] };
+          if (!dependencies.getRun) throw new Error('Run storage is unavailable');
+          var run = dependencies.getRun(id);
+          return { valid: true, runId: run.runId, state: run.state, payrollMonth: run.payrollMonth,
+            cutoff: run.cutoff, cutoffMode: run.cutoffMode, departmentScope: run.departmentScope,
+            results: run.results || [], failedDepartments: run.failedDepartments || [],
+            departmentErrors: run.departmentErrors || [], failedEmployees: run.failedEmployees || [],
+            employeeErrors: run.employeeErrors || [], partialDepartmentsFingerprint: run.partialDepartmentsFingerprint || null,
+            acknowledgements: run.acknowledgements || {}, writeBackStatus: run.writeBackStatus || null,
+            retryableApproval: !!run.approvalCheckpoint && (run.state === 'DRAFT' || run.writeBackStatus !== 'COMPLETE' ||
+              run.approvalCheckpoint.latestStatus !== 'COMPLETE') };
+        });
+      },
       saveOverride: function (request) { return orchestrator.saveOverride(request); },
       approveRun: function (runId) {
         var email = actor(), authorization = approverStatus(email);
@@ -315,6 +348,9 @@ SalaryCalculator.MenuAndApi = (function () {
     var approverEmails = approverSetting.split(/[,\n\r]+/).map(function (email) { return email.trim().toLowerCase(); }).filter(Boolean);
     var api = create({ orchestrator: orchestrator, ocrService: SalaryCalculator.OcrService, getEmployees: getEmployees,
       getHolidayCalendar: getHolidayCalendar,
+      getRun: function (runId) { return repository.getRun(runId); },
+      getLastRunId: function () { return PropertiesService.getUserProperties().getProperty('PAYROLL_LAST_RUN_ID'); },
+      rememberRunId: function (runId) { PropertiesService.getUserProperties().setProperty('PAYROLL_LAST_RUN_ID', runId); },
       getEmployeesForRun: function (runId) {
         var cached = CacheService.getUserCache().get('PAYROLL_VALIDATION_' + runId);
         return cached ? JSON.parse(cached) : [];
@@ -368,10 +404,12 @@ SalaryCalculator.MenuAndApi = (function () {
 })();
 
 function onOpen() { SalaryCalculator.MenuAndApi.addMenu(); }
+function include(filename) { return HtmlService.createHtmlOutputFromFile(filename).getContent(); }
 function showPayrollSidebar() { return SalaryCalculator.MenuAndApi.current().showPayrollSidebar(); }
 function getRunSetup() { return SalaryCalculator.MenuAndApi.current().getRunSetup(); }
 function validateRun(request) { return SalaryCalculator.MenuAndApi.current().validateRun(request); }
 function calculateDraft(request) { return SalaryCalculator.MenuAndApi.current().calculateDraft(request); }
+function getRunState(request) { return SalaryCalculator.MenuAndApi.current().getRunState(request); }
 function saveOverride(request) { return SalaryCalculator.MenuAndApi.current().saveOverride(request); }
 function approveRun(runId) { return SalaryCalculator.MenuAndApi.current().approveRun(runId); }
 function processHolidayScreenshot(request) { return SalaryCalculator.MenuAndApi.current().processHolidayScreenshot(request); }

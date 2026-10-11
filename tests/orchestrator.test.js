@@ -681,6 +681,56 @@ test('sidebar API exposes partial department failures separately from blocking e
   assert.equal(draft.acknowledgements.partialDepartmentsFingerprint, 'partial-api');
 });
 
+test('sidebar API reports omitted employees and probation status without internal roster fields', () => {
+  const { MenuAndApi } = loadAppsScript();
+  const employeeErrors = [{ code: 'REFERRAL_EMPLOYEE_ID_COLLISION', department: 'SURVEY', employeeId: 'EMP-BAD', message: 'Collision' }];
+  const healthy = { employeeId: 'EMP-OK', americanName: 'Alex Smith', department: 'SURVEY' };
+  const newer = { employeeId: 'EMP-NEW', americanName: 'Jamie Doe', department: 'SURVEY' };
+  const api = MenuAndApi.create({ orchestrator: { validateRequest: () => ({ valid: true, runId: 'RUN-1',
+    payrollMonth: '2026-09', period: { endDate: '2026-09-30' }, employees: [healthy, newer],
+    inputs: [{ ...healthy, realName: 'Private', firstWorkingDay: '2026-07-01' },
+      { ...newer, firstWorkingDay: '2026-07-03' }],
+    failedEmployees: [{ department: 'SURVEY', employeeId: 'EMP-BAD' }], employeeErrors,
+    partialDepartmentsFingerprint: 'exact-v1', errors: employeeErrors }) } });
+  const result = api.validateRun({ payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['ALL'] });
+  assert.deepEqual(plain(result.failedEmployees), [{ department: 'SURVEY', employeeId: 'EMP-BAD' }]);
+  assert.deepEqual(plain(result.employeeErrors), employeeErrors);
+  assert.deepEqual(plain(result.errors), []);
+  assert.equal(result.employees[0].passedProbation, true);
+  assert.equal(result.employees[1].passedProbation, false);
+  assert.equal(JSON.stringify(result).includes('Private'), false);
+});
+
+test('sidebar reads the last persisted run for approval retry without exposing source snapshots', () => {
+  const { MenuAndApi } = loadAppsScript();
+  const remembered = [];
+  const api = MenuAndApi.create({ orchestrator: {
+    validateRequest: () => ({ valid: true, runId: 'RUN-RETRY', period: { endDate: '2026-09-30' }, employees: [], errors: [] }),
+    calculateDraft: () => ({ valid: true, runId: 'RUN-RETRY', state: 'DRAFT', results: [] })
+  }, saveValidationEmployees() {}, rememberRunId: id => remembered.push(id), getLastRunId: () => remembered.at(-1),
+  getRun: id => ({ runId: id, state: 'DRAFT', payrollMonth: '2026-09', cutoffMode: 'MONTH_END',
+    departmentScope: ['SURVEY'], results: [{ employeeId: 'EMP-1', americanName: 'Alex', components: {}, total: 500 }],
+    approvalCheckpoint: { state: 'APPROVING' }, writeBackStatus: 'FAILED',
+    sourceSnapshot: { secret: 'Private' }, inputs: [{ realName: 'Private' }] }) });
+  api.validateRun({ payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['SURVEY'] });
+  assert.deepEqual(remembered, []);
+  api.calculateDraft({ payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['SURVEY'] });
+  const run = api.getRunState();
+  assert.equal(run.runId, 'RUN-RETRY');
+  assert.equal(run.retryableApproval, true);
+  assert.equal(run.results[0].total, 500);
+  assert.equal(JSON.stringify(run).includes('Private'), false);
+});
+
+test('completed approvals are shown as complete rather than retryable', () => {
+  const { MenuAndApi } = loadAppsScript();
+  const api = MenuAndApi.create({ getRun: () => ({ runId: 'RUN-DONE', state: 'APPROVED',
+    writeBackStatus: 'COMPLETE', approvalCheckpoint: { latestStatus: 'COMPLETE' }, results: [] }) });
+  const result = api.getRunState('RUN-DONE');
+  assert.equal(result.valid, true);
+  assert.equal(result.retryableApproval, false);
+});
+
 test('Apps Script globals are available and the custom menu targets the required actions', () => {
   const menuItems = [], added = [];
   const context = vm.createContext({ SpreadsheetApp: { getUi() { return { createMenu(name) {
@@ -699,6 +749,20 @@ test('Apps Script globals are available and the custom menu targets the required
     ['Configuration Check', 'configurationCheck'], ['Initialize/Repair Workbook', 'initializeRepairWorkbook']
   ]);
   assert.equal(added.length, 1);
+});
+
+test('sidebar template evaluates its included styles and scripts through project globals', () => {
+  const sourceDir = path.resolve(__dirname, '../src');
+  const context = vm.createContext({ HtmlService: {
+    createHtmlOutputFromFile(name) { return { getContent() { return fs.readFileSync(path.join(sourceDir, name + '.html'), 'utf8'); } }; }
+  } });
+  fs.readdirSync(sourceDir).filter(file => file.endsWith('.js')).sort().forEach(file =>
+    vm.runInContext(fs.readFileSync(path.join(sourceDir, file), 'utf8'), context, { filename: file }));
+  const template = fs.readFileSync(path.join(sourceDir, 'PayrollSidebar.html'), 'utf8');
+  const evaluated = template.replace(/<\?!=\s*([\s\S]*?)\s*\?>/g, (_, expression) => vm.runInContext(expression, context));
+  assert.match(evaluated, /<style>/);
+  assert.match(evaluated, /PayrollSidebarOcrAttemptTracker/);
+  assert.doesNotMatch(evaluated, /<\?!=/);
 });
 
 test('multi-day Holiday Calendar ranges expand to every actual date', () => {
