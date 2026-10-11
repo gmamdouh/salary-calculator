@@ -180,12 +180,21 @@ SalaryCalculator.WorkbookSetup = (function () {
     masterGateway().format(sheet, 2, 2, HOLIDAYS_2027.length, 2, 'dd-MM-yyyy');
   }
   function protectedEditors(policy) {
+    function deny(code, message) {
+      var error = new Error(message);
+      error.code = code;
+      error.issues = [{ code: code, message: message }];
+      throw error;
+    }
     var configured = policy && policy.editorEmails;
-    var effective = policy && String(policy.effectiveUserEmail || '').trim().toLowerCase();
-    if (!Array.isArray(configured) || !configured.length || !effective) throw new Error('Protected editor configuration is missing');
+    var acting = policy && String(policy.actingUserEmail || '').trim().toLowerCase();
+    if (!Array.isArray(configured) || !configured.length || !acting)
+      deny('PROTECTED_EDITOR_CONFIGURATION_MISSING', 'Protected editor configuration or acting user identity is missing');
     var emails = configured.map(function (email) { return String(email).trim().toLowerCase(); });
-    if (emails.indexOf(effective) === -1) emails.push(effective);
-    if (emails.some(function (email) { return !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email); })) throw new Error('Protected editor configuration has an invalid email');
+    if (emails.some(function (email) { return !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email); }))
+      deny('PROTECTED_EDITOR_CONFIGURATION_INVALID', 'Protected editor configuration has an invalid email');
+    if (emails.indexOf(acting) === -1)
+      deny('PROTECTED_EDITOR_NOT_AUTHORIZED', 'The acting user must be a configured protected editor');
     return emails.filter(function (email, index) { return emails.indexOf(email) === index; });
   }
   function enforceProtections(sheetMap, policy) {

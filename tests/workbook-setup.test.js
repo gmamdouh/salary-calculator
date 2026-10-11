@@ -75,7 +75,7 @@ function fakeSpreadsheet() {
 }
 
 const managed = ['Dashboard', 'Sources & Mappings', 'Salary Rules', 'Holiday Calendar', 'Latest Results', 'Payroll History', 'Payment Ledger', 'Override Audit', 'Run Decisions'];
-const policy = { editorEmails: ['approver@example.test'], effectiveUserEmail: 'executor@example.test' };
+const policy = { editorEmails: ['approver@example.test', 'executor@example.test'], effectiveUserEmail: 'executor@example.test', actingUserEmail: 'approver@example.test' };
 
 test('initialization creates the approved managed tabs with stable headers and protected technical identifiers', () => {
   const { WorkbookSetup } = loadAppsScript();
@@ -213,6 +213,36 @@ test('initialization requires an editor policy and restricts complete sensitive 
   assert.deepEqual(spreadsheet.getSheets().map(sheet => sheet.protections.length), count);
 });
 
+test('an unlisted acting user cannot initialize or acquire protected editor access', () => {
+  const { WorkbookSetup } = loadAppsScript();
+  const spreadsheet = fakeSpreadsheet(), audit = spreadsheet.insertSheet('Override Audit');
+  audit.protect().setDescription('SalaryCalculator: protected Override Audit');
+  const originalEditors = audit.protections[0].protection.editors.slice();
+  for (const denied of [
+    { editorEmails: ['approver@example.test'], actingUserEmail: 'outsider@example.test', effectiveUserEmail: 'approver@example.test' }
+  ]) {
+    assert.throws(() => WorkbookSetup.initialize(spreadsheet, denied), error => {
+      assert.equal(error.issues[0].code, 'PROTECTED_EDITOR_NOT_AUTHORIZED'); return true;
+    });
+    assert.deepEqual(audit.protections[0].protection.editors, originalEditors);
+    assert.equal(spreadsheet.getSheetByName('Payroll Runs'), null);
+  }
+  WorkbookSetup.initialize(spreadsheet, { editorEmails: ['approver@example.test'], actingUserEmail: 'approver@example.test', effectiveUserEmail: 'approver@example.test' });
+  assert.deepEqual(audit.protections[0].protection.editors, ['approver@example.test']);
+});
+
+test('a listed acting user can initialize without adding an unlisted effective user', () => {
+  const { WorkbookSetup } = loadAppsScript();
+  const spreadsheet = fakeSpreadsheet();
+  WorkbookSetup.initialize(spreadsheet, {
+    editorEmails: ['approver@example.test'],
+    actingUserEmail: 'approver@example.test',
+    effectiveUserEmail: 'owner@example.test'
+  });
+  const protectedSheet = spreadsheet.getSheetByName('Payroll History');
+  assert.deepEqual(protectedSheet.protections[0].protection.editors, ['approver@example.test']);
+});
+
 test('production protection adapter repairs editors and domain access on an existing protected sheet', () => {
   const { SpreadsheetGateway } = loadAppsScript();
   const spreadsheet = fakeSpreadsheet(), sheet = spreadsheet.insertSheet('Payroll History');
@@ -255,13 +285,13 @@ test('approval stops before payroll writes when workbook protection cannot be en
   assert.match(result.errors[0].message, /protected editor/i);
 });
 
-test('production configuration check and initialization fail closed when script identity is unavailable', () => {
+test('production configuration check and initialization fail closed when acting identity is unavailable', () => {
   const spreadsheet = fakeSpreadsheet();
   const { WorkbookSetup, MenuAndApi } = loadAppsScript({
     SpreadsheetApp: { getActiveSpreadsheet: () => spreadsheet, ProtectionType: { SHEET: 'SHEET', RANGE: 'RANGE' } },
     LockService: {},
     PropertiesService: { getScriptProperties: () => ({ getProperty: key => key === 'PAYROLL_APPROVER_EMAILS' ? 'approver@example.test' : '' }) },
-    Session: { getEffectiveUser: () => ({ getEmail: () => '' }), getActiveUser: () => ({ getEmail: () => 'approver@example.test' }) }
+    Session: { getEffectiveUser: () => { throw new Error('Effective identity must not be read'); }, getActiveUser: () => { throw new Error('Active identity unavailable'); } }
   });
   WorkbookSetup.ensureManagedSheets(spreadsheet);
   const api = MenuAndApi.current();
@@ -269,8 +299,28 @@ test('production configuration check and initialization fail closed when script 
   assert.equal(check.valid, false);
   assert.equal(check.protection.valid, false);
   assert.equal(check.protection.errors[0].code, 'PROTECTED_EDITOR_CONFIGURATION_MISSING');
-  assert.throws(() => api.initializeWorkbook(), /protected editor/i);
+  assert.equal(api.initializeWorkbook().errors[0].code, 'PROTECTED_EDITOR_CONFIGURATION_MISSING');
   assert.equal(api.approveRun('RUN-001').valid, false);
+});
+
+test('production API denies an unlisted caller before protected draft, override, or initialization writes', () => {
+  const spreadsheet = fakeSpreadsheet();
+  const { WorkbookSetup, MenuAndApi } = loadAppsScript({
+    SpreadsheetApp: { getActiveSpreadsheet: () => spreadsheet, ProtectionType: { SHEET: 'SHEET', RANGE: 'RANGE' } },
+    LockService: {},
+    PropertiesService: { getScriptProperties: () => ({ getProperty: key => key === 'PAYROLL_APPROVER_EMAILS' ? 'outsider@example.test' :
+      key === 'PAYROLL_PROTECTED_EDITOR_EMAILS' ? 'approver@example.test' : '' }) },
+    Session: { getEffectiveUser: () => ({ getEmail: () => 'outsider@example.test' }), getActiveUser: () => ({ getEmail: () => 'outsider@example.test' }) }
+  });
+  WorkbookSetup.ensureManagedSheets(spreadsheet);
+  const api = MenuAndApi.current();
+  for (const action of [() => api.calculateDraft({}), () => api.saveOverride({}), () => api.initializeWorkbook(), () => api.approveRun('RUN-001')]) {
+    const result = action();
+    assert.equal(result.valid, false);
+    assert.equal(result.errors[0].code, 'PROTECTED_EDITOR_NOT_AUTHORIZED');
+  }
+  assert.equal(spreadsheet.getSheetByName('Payroll Runs').getLastRow(), 1);
+  assert.equal(spreadsheet.getSheetByName('Payroll Runs').protections.length, 0);
 });
 
 test('production workbook initialization rebuilds Dashboard from saved run records', () => {
@@ -278,13 +328,15 @@ test('production workbook initialization rebuilds Dashboard from saved run recor
   const { WorkbookSetup, MenuAndApi } = loadAppsScript({
     SpreadsheetApp: { getActiveSpreadsheet: () => spreadsheet, ProtectionType: { SHEET: 'SHEET', RANGE: 'RANGE' } },
     LockService: {},
-    PropertiesService: { getScriptProperties: () => ({ getProperty: key => key === 'PAYROLL_APPROVER_EMAILS' ? 'approver@example.test' : '' }) },
-    Session: { getEffectiveUser: () => ({ getEmail: () => 'executor@example.test' }), getActiveUser: () => ({ getEmail: () => 'approver@example.test' }) }
+    PropertiesService: { getScriptProperties: () => ({ getProperty: key => key === 'PAYROLL_APPROVER_EMAILS' ? 'approver@example.test' :
+      key === 'PAYROLL_PROTECTED_EDITOR_EMAILS' ? 'approver@example.test' : '' }) },
+    Session: { getEffectiveUser: () => ({ getEmail: () => 'owner@example.test' }), getActiveUser: () => ({ getEmail: () => 'approver@example.test' }) }
   });
   WorkbookSetup.ensureManagedSheets(spreadsheet);
   const run = runRecord({ state: 'DRAFT', createdAt: '2026-10-04T09:00:00Z', warnings: ['Review attendance'] });
   spreadsheet.getSheetByName('Payroll Runs').getRange(2, 1, 1, 6).setValues([[run.runId, run.version, run.state, run.payrollMonth, run.cutoff, JSON.stringify(run)]]);
   assert.equal(MenuAndApi.current().initializeWorkbook().valid, true);
+  assert.deepEqual(spreadsheet.getSheetByName('Payroll History').protections[0].protection.editors, ['approver@example.test']);
   const dashboard = spreadsheet.getSheetByName('Dashboard');
   assert.match(dashboard.getRange(1, 1, dashboard.getLastRow(), 3).getValues().flat().map(String).join('|'), /RUN-001|DRAFT|Review attendance/);
 });
@@ -294,7 +346,8 @@ test('production initialization refreshes approved Latest Results using per-resu
   const { WorkbookSetup, MenuAndApi } = loadAppsScript({
     SpreadsheetApp: { getActiveSpreadsheet: () => spreadsheet, ProtectionType: { SHEET: 'SHEET', RANGE: 'RANGE' } },
     LockService: {},
-    PropertiesService: { getScriptProperties: () => ({ getProperty: key => key === 'PAYROLL_APPROVER_EMAILS' ? 'approver@example.test' : '' }) },
+    PropertiesService: { getScriptProperties: () => ({ getProperty: key => key === 'PAYROLL_APPROVER_EMAILS' ? 'approver@example.test' :
+      key === 'PAYROLL_PROTECTED_EDITOR_EMAILS' ? 'approver@example.test,executor@example.test' : '' }) },
     Session: { getEffectiveUser: () => ({ getEmail: () => 'executor@example.test' }), getActiveUser: () => ({ getEmail: () => 'approver@example.test' }) }
   });
   WorkbookSetup.ensureManagedSheets(spreadsheet);

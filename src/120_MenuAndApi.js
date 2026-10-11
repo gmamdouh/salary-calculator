@@ -114,6 +114,7 @@ SalaryCalculator.MenuAndApi = (function () {
     function calculateDraft(request) {
       return guarded(function () {
         request = request || {};
+        if (dependencies.ensureProtection) dependencies.ensureProtection();
         var result = orchestrator.calculateDraft(request);
         if (!result || result.valid === false) return result || { valid: false, errors: [issue('DRAFT_FAILED', 'The draft could not be calculated.')] };
         if (result.runId && dependencies.rememberRunId) {
@@ -171,7 +172,10 @@ SalaryCalculator.MenuAndApi = (function () {
               run.approvalCheckpoint.latestStatus !== 'COMPLETE') };
         });
       },
-      saveOverride: function (request) { return orchestrator.saveOverride(request); },
+      saveOverride: function (request) { return guarded(function () {
+        if (dependencies.ensureProtection) dependencies.ensureProtection();
+        return orchestrator.saveOverride(request);
+      }); },
       approveRun: function (runId) {
         var email = actor(), authorization = approverStatus(email);
         if (!authorization.valid) return { valid: false, runId: runId, errors: [issue(authorization.code,
@@ -196,8 +200,10 @@ SalaryCalculator.MenuAndApi = (function () {
     var approverSetting = properties.getProperty('PAYROLL_APPROVER_EMAILS') || '';
     var approverEmails = approverSetting.split(/[,\n\r]+/).map(function (email) { return email.trim().toLowerCase(); }).filter(Boolean);
     var protectedSetting = properties.getProperty('PAYROLL_PROTECTED_EDITOR_EMAILS') || approverSetting;
+    var actingUserEmail = '';
+    try { actingUserEmail = Session.getActiveUser().getEmail(); } catch (error) { /* Configuration checks report the missing identity. */ }
     var protectionPolicy = { editorEmails: protectedSetting.split(/[,\n\r]+/).map(function (email) { return email.trim().toLowerCase(); }).filter(Boolean),
-      effectiveUserEmail: Session.getEffectiveUser().getEmail() };
+      actingUserEmail: actingUserEmail };
     var protectionChecked = false;
     function sheet(name) {
       if (!sheets[name]) {
@@ -360,7 +366,7 @@ SalaryCalculator.MenuAndApi = (function () {
     }
     var orchestrator = SalaryCalculator.PayrollOrchestrator.create({ sourceGateway: sourceGateway, repository: repository,
       getConfigs: getConfigs, getRules: getRules, rulesVersion: 'configured', clock: function () { return new Date().toISOString(); },
-      actor: function () { return Session.getActiveUser().getEmail() || 'unknown'; }, auditStore: auditStore,
+      actor: function () { return actingUserEmail || 'unknown'; }, auditStore: auditStore,
       getHolidayCalendar: getHolidayCalendar,
       getBenefitLedger: function () { return storage.list('Payment Ledger'); } });
     var api = create({ orchestrator: orchestrator, ocrService: SalaryCalculator.OcrService, getEmployees: getEmployees,
@@ -375,7 +381,7 @@ SalaryCalculator.MenuAndApi = (function () {
       saveValidationEmployees: function (runId, employees) {
         CacheService.getUserCache().put('PAYROLL_VALIDATION_' + runId, JSON.stringify(employees), 21600);
       },
-      actor: function () { return Session.getActiveUser().getEmail() || 'unknown'; },
+      actor: function () { return actingUserEmail || 'unknown'; },
       approverEmails: approverEmails,
       ensureProtection: ensureProtection,
       makeAuditBlob: function (value, type, name) { return Utilities.newBlob(value, type, name); },
@@ -393,17 +399,21 @@ SalaryCalculator.MenuAndApi = (function () {
       mapping.valid = mapping.errors.length === 0;
       var protection = { valid: true, errors: [] };
       try { SalaryCalculator.WorkbookSetup.protectedEditors(protectionPolicy); }
-      catch (error) { protection = { valid: false, errors: [{ code: 'PROTECTED_EDITOR_CONFIGURATION_MISSING', message: error.message }] }; }
+      catch (error) { protection = { valid: false, errors: error.issues || [{ code: error.code || 'PROTECTED_EDITOR_CONFIGURATION_MISSING', message: error.message }] }; }
       return { valid: mapping.valid && access.every(function (item) { return item.valid; }) && protection.valid,
         mapping: mapping, sources: access, protection: protection };
     };
     api.initializeWorkbook = function () {
-      var result = SalaryCalculator.WorkbookSetup.initialize(book, protectionPolicy);
-      sheets = SalaryCalculator.WorkbookSetup.ensureManagedSheets(book);
-      protectionChecked = true;
-      SalaryCalculator.WorkbookSetup.projectDashboard(sheets, storage.list('Payroll Runs'));
-      if (repository.listLatestResults().length) storage.renderLatestResults();
-      return result;
+      try {
+        var result = SalaryCalculator.WorkbookSetup.initialize(book, protectionPolicy);
+        sheets = SalaryCalculator.WorkbookSetup.ensureManagedSheets(book);
+        protectionChecked = true;
+        SalaryCalculator.WorkbookSetup.projectDashboard(sheets, storage.list('Payroll Runs'));
+        if (repository.listLatestResults().length) storage.renderLatestResults();
+        return result;
+      } catch (error) {
+        return { valid: false, errors: error.issues || [{ code: error.code || 'WORKBOOK_INITIALIZATION_FAILED', message: error.message }] };
+      }
     };
     api.showLatestResults = function () { book.setActiveSheet(sheet('Latest Results')); };
     api.showPayrollSidebar = function () {
