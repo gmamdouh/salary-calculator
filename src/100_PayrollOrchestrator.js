@@ -13,6 +13,12 @@ SalaryCalculator.PayrollOrchestrator = (function () {
     });
     return result;
   }
+  function rulesVersion(snapshot) {
+    var serialized = JSON.stringify(stableValue(snapshot));
+    var hash = 2166136261;
+    for (var index = 0; index < serialized.length; index++) hash = Math.imul(hash ^ serialized.charCodeAt(index), 16777619) >>> 0;
+    return 'rules-fnv1a32-' + ('00000000' + hash.toString(16)).slice(-8);
+  }
   function partialDepartmentsFingerprint(failedDepartments, departmentErrors, failedEmployees, employeeErrors) {
     var departments = (failedDepartments || []).map(String).sort();
     var employees = (failedEmployees || []).map(stableValue).sort(function (left, right) {
@@ -331,7 +337,11 @@ SalaryCalculator.PayrollOrchestrator = (function () {
       }
       if (unresolvedOcr(decisions)) return { valid: false, state: 'BLOCKED', runId: report.runId,
         errors: [issue('OCR_UNRESOLVED', 'Resolve all ambiguous, unmatched, and unconfirmed OCR entries before drafting.')], warnings: [] };
-      var rules = dependencies.getRules ? dependencies.getRules() : {};
+      var rules;
+      try { rules = dependencies.getRules ? dependencies.getRules() : {}; }
+      catch (error) { return { valid: false, state: 'BLOCKED', runId: report.runId,
+        errors: error.issues || [issue('INVALID_RULES', error.message || 'Payroll rules are invalid.')], warnings: [] }; }
+      var rulesSnapshot = copy(stableValue(rules));
       var ledger = dependencies.getBenefitLedger ? dependencies.getBenefitLedger() : [];
       var referralsByReferrer = Object.create(null), referralKeys = Object.create(null);
       var rosterById = Object.create(null);
@@ -433,7 +443,7 @@ SalaryCalculator.PayrollOrchestrator = (function () {
         persistedAcknowledgements.partialDepartmentsReport = partialDepartmentsReport;
       }
       var run = { runId: id, version: 1, state: 'DRAFT', payrollMonth: report.payrollMonth, cutoff: report.period.endDate,
-        cutoffMode: report.cutoffMode, departmentScope: report.departmentScope, rulesVersion: dependencies.rulesVersion || 'unknown',
+        cutoffMode: report.cutoffMode, departmentScope: report.departmentScope, rulesVersion: rulesVersion(rulesSnapshot), rulesSnapshot: rulesSnapshot,
         createdBy: actor(), createdAt: timestamp, sourceSnapshot: report.sourceSnapshot, sourceConfigs: report.sourceConfigs,
         inputs: report.inputs, referralSourceSnapshot: report.referralSourceSnapshot, decisions: decisions, ocrAuditEvidence: auditEvidence, results: results,
         failedDepartments: report.failedDepartments || [], departmentErrors: report.departmentErrors || [],

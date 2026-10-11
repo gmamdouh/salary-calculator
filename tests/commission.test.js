@@ -1,7 +1,14 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { loadAppsScript } = require('./helpers/load-apps-script');
-const { Commission } = loadAppsScript();
+const rawCommission = loadAppsScript().Commission;
+const rules = rawCommission.parseRows(rawCommission.defaultRows());
+const Commission = {
+  calculateSurvey: transfers => rawCommission.calculateSurvey(transfers, rules),
+  calculateReservations: transfers => rawCommission.calculateReservations(transfers, rules),
+  calculateSales: (sales, conversionRate) => rawCommission.calculateSales(sales, conversionRate, rules),
+  calculateTds: agents => rawCommission.calculateTds(agents, rules)
+};
 test('Survey pins every transfer band boundary', () => {
   for (const [count, amount] of [[0,0],[1,10],[200,2000],[201,2015],[300,3500],[301,4515],[350,5250],[351,7020],[400,8000],[401,10025],[500,12500],[501,15030]]) {
     assert.equal(Commission.calculateSurvey(count), amount);

@@ -70,6 +70,9 @@ SalaryCalculator.Contracts = (function () {
       ['runId', 'rulesVersion', 'createdBy', 'payrollMonth', 'cutoff'].forEach(function (key) { assertText(run[key], key); });
       if (!Number.isSafeInteger(run.version) || run.version < 1) throw new Error('version must be a positive integer');
       assertObject(run.sourceSnapshot, 'sourceSnapshot');
+      assertObject(run.rulesSnapshot, 'rulesSnapshot');
+      assertObject(run.rulesSnapshot.salaries, 'rulesSnapshot.salaries');
+      assertObject(run.rulesSnapshot.commissions, 'rulesSnapshot.commissions');
       if (!Array.isArray(run.results) || !run.results.length) throw new Error('results are required');
       return run;
     },

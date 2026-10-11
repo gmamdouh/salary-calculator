@@ -7,7 +7,7 @@ const { loadAppsScript } = require('./helpers/load-apps-script');
 const plain = value => JSON.parse(JSON.stringify(value));
 
 function fixture(options = {}) {
-  const { PayrollOrchestrator } = loadAppsScript();
+  const { PayrollOrchestrator, Commission } = loadAppsScript();
   const config = { department: 'SURVEY', spreadsheetId: 'source-survey', leaveSpreadsheetId: 'leave-survey',
     employeeTab: 'Team', attendanceTab: 'Days', employeeHeaderRow: 1, attendanceHeaderRow: 1,
     employeeColumns: { employeeId: 'ID', americanName: 'Name', firstWorkingDay: 'Joined', transfers: 'Transfers' },
@@ -38,7 +38,7 @@ function fixture(options = {}) {
   };
   return { PayrollOrchestrator, config, period, sourceGateway, repository, calls,
     orchestrator: PayrollOrchestrator && PayrollOrchestrator.create({
-      sourceGateway, repository, getConfigs: () => configs, getRules: options.getRules || (() => ({ salaries: {
+      sourceGateway, repository, getConfigs: () => configs, getRules: options.getRules || (() => ({ commissions: Commission.parseRows(Commission.defaultRows()), salaries: {
         SURVEY: { before: { basic: 12000, abs: 2000 }, after: { basic: 15000, abs: 3000 } },
         RESERVATIONS: { before: { basic: 12000, abs: 2000 }, after: { basic: 15000, abs: 3000 } },
         SALES: { before: { basic: 16000, abs: 4000 }, after: { basic: 16000, abs: 4000 } },
@@ -293,6 +293,34 @@ test('a valid draft is calculated and persisted with its source snapshot and ser
   assert.equal(run.createdBy, 'hr@example.test');
   assert.equal(run.results[0].employeeId, 'EMP-001');
   assert.equal(calls.some(call => call[0] === 'draft' && call[1].sourceSnapshot.SURVEY.employeeRows[0].values[0] === 'EMP-001'), true);
+});
+
+test('draft retains effective rules and a stable version after configuration changes', () => {
+  const { Commission } = loadAppsScript();
+  const rows = Commission.defaultRows();
+  const base = fixture();
+  const salaries = base.orchestrator.calculateDraft({ payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['SURVEY'] }).rulesSnapshot.salaries;
+  const getRules = () => ({ salaries, commissions: Commission.parseRows(rows) });
+  const first = fixture({ getRules }).orchestrator.calculateDraft({ payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['SURVEY'] });
+  rows.reverse();
+  const again = fixture({ getRules }).orchestrator.calculateDraft({ payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['SURVEY'] });
+  assert.equal(first.rulesVersion, again.rulesVersion);
+  assert.deepEqual(plain(first.rulesSnapshot), plain(again.rulesSnapshot));
+  rows.find(row => row[1] === 'SURVEY' && row[2] === '1-200')[3] = 20;
+  const changed = fixture({ getRules }).orchestrator.calculateDraft({ payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['SURVEY'] });
+  assert.notEqual(changed.rulesVersion, first.rulesVersion);
+  assert.equal(first.rulesSnapshot.commissions.survey[0].rate, 10);
+  assert.equal(changed.results[0].components.commission.amount, 200);
+});
+
+test('invalid commission configuration blocks draft with a structured rule error', () => {
+  const { Commission } = loadAppsScript();
+  const rows = Commission.defaultRows().filter(row => !(row[1] === 'SALES' && row[2] === '4.00%-4.99%|30-39'));
+  const { orchestrator, calls } = fixture({ getRules: () => ({ commissions: Commission.parseRows(rows) }) });
+  const result = orchestrator.calculateDraft({ payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['SURVEY'] });
+  assert.equal(result.valid, false);
+  assert.equal(result.errors[0].code, 'INVALID_COMMISSION_RULE');
+  assert.equal(calls.some(call => call[0] === 'draft'), false);
 });
 
 test('confirmed holiday work applies its calendar dates only to selected Employee IDs', () => {
@@ -772,7 +800,7 @@ test('multi-day Holiday Calendar ranges expand to every actual date', () => {
 });
 
 test('failed write-back resumes one approval checkpoint without duplicating history or benefits', () => {
-  const { RunRepository } = loadAppsScript();
+  const { RunRepository, Commission } = loadAppsScript();
   const tables = new Map(), events = [];
   let failWrite = true, locked = false;
   const getTable = name => { if (!tables.has(name)) tables.set(name, new Map()); return tables.get(name); };
@@ -791,7 +819,8 @@ test('failed write-back resumes one approval checkpoint without duplicating hist
   };
   const repository = RunRepository.create({ gateway, lockService, now: () => '2026-10-04T10:00:00.000Z', sourceGateway });
   const orchestrator = PayrollOrchestrator.create({ sourceGateway, repository, getConfigs: () => [config],
-    getRules: () => ({ salaries: { SURVEY: { before: { basic: 12000, abs: 2000 }, after: { basic: 15000, abs: 3000 } } } }),
+    getRules: () => ({ salaries: { SURVEY: { before: { basic: 12000, abs: 2000 }, after: { basic: 15000, abs: 3000 } } },
+      commissions: Commission.parseRows(Commission.defaultRows()) }),
     rulesVersion: 'rules-v1', clock: () => '2026-10-04T10:00:00.000Z', actor: () => 'hr@example.test', buildPeriod: () => period });
   const run = orchestrator.calculateDraft({ payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['SURVEY'] });
   assert.equal(run.valid, true);
@@ -836,7 +865,7 @@ test('effective latest results include employees outside a scoped approval', () 
   repository = RunRepository.create({ gateway, lockService, now: () => '2026-10-02T00:00:00.000Z' });
   const surveyResult = { employeeId: 'EMP-SUR', americanName: 'Alex Smith', department: 'SURVEY',
     payrollMonth: '2026-09', total: 200, components: {} };
-  repository.createDraft({ runId: 'RUN-SUR', version: 1, rulesVersion: 'v1', createdBy: 'hr@example.test',
+  repository.createDraft({ runId: 'RUN-SUR', version: 1, rulesVersion: 'v1', rulesSnapshot: { salaries: {}, commissions: {} }, createdBy: 'hr@example.test',
     payrollMonth: '2026-09', cutoff: '2026-09-30', sourceSnapshot: {}, results: [surveyResult], inputs: [], decisions: {}, sourceConfigs: [] });
   assert.throws(() => repository.approve('RUN-SUR', 'approver@example.test'), /Simulated interruption/);
   assert.equal(repository.getRun('RUN-SUR').approvalCheckpoint.latestStatus, 'PENDING');

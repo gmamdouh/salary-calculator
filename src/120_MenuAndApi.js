@@ -236,7 +236,8 @@ SalaryCalculator.MenuAndApi = (function () {
     }
     function getRules() {
       var rules = { salaries: {} };
-      readRows('Salary Rules').slice(1).forEach(function (row) {
+      var rows = readRows('Salary Rules').slice(1);
+      rows.forEach(function (row) {
         var type = String(row[0] || '').trim(), department = String(row[1] || '').trim(), key = String(row[2] || '').trim(), value = row[3];
         if (type === 'SALARY' && department && key) {
           var pieces = key.split('.');
@@ -249,6 +250,7 @@ SalaryCalculator.MenuAndApi = (function () {
           rules.salesQuarterlyPaymentMonths = String(value).split(',').map(function (month) { return Number(month.trim()); });
         }
       });
+      rules.commissions = SalaryCalculator.Commission.parseRows(rows);
       return rules;
     }
     function holidayDates(value) {
@@ -365,7 +367,7 @@ SalaryCalculator.MenuAndApi = (function () {
       }, []);
     }
     var orchestrator = SalaryCalculator.PayrollOrchestrator.create({ sourceGateway: sourceGateway, repository: repository,
-      getConfigs: getConfigs, getRules: getRules, rulesVersion: 'configured', clock: function () { return new Date().toISOString(); },
+      getConfigs: getConfigs, getRules: getRules, clock: function () { return new Date().toISOString(); },
       actor: function () { return actingUserEmail || 'unknown'; }, auditStore: auditStore,
       getHolidayCalendar: getHolidayCalendar,
       getBenefitLedger: function () { return storage.list('Payment Ledger'); } });
@@ -400,8 +402,11 @@ SalaryCalculator.MenuAndApi = (function () {
       var protection = { valid: true, errors: [] };
       try { SalaryCalculator.WorkbookSetup.protectedEditors(protectionPolicy); }
       catch (error) { protection = { valid: false, errors: error.issues || [{ code: error.code || 'PROTECTED_EDITOR_CONFIGURATION_MISSING', message: error.message }] }; }
-      return { valid: mapping.valid && access.every(function (item) { return item.valid; }) && protection.valid,
-        mapping: mapping, sources: access, protection: protection };
+      var rules = { valid: true, errors: [] };
+      try { getRules(); }
+      catch (error) { rules = { valid: false, errors: error.issues || [{ code: error.code || 'INVALID_RULES', message: error.message }] }; }
+      return { valid: mapping.valid && access.every(function (item) { return item.valid; }) && protection.valid && rules.valid,
+        mapping: mapping, sources: access, protection: protection, rules: rules };
     };
     api.initializeWorkbook = function () {
       try {
@@ -422,7 +427,7 @@ SalaryCalculator.MenuAndApi = (function () {
     };
     api.openConfigurationCheck = function () {
       var result = api.configurationCheck();
-      SpreadsheetApp.getUi().alert(result.valid ? 'Configuration is ready.' : 'Configuration has errors. Review Sources & Mappings and protected editor Script Properties.');
+      SpreadsheetApp.getUi().alert(result.valid ? 'Configuration is ready.' : 'Configuration has errors. Review Sources & Mappings, Salary Rules, and protected editor Script Properties.');
       return result;
     };
     return api;

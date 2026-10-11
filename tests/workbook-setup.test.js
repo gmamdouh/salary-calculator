@@ -130,6 +130,37 @@ test('initialization is idempotent and seeds the exact 2027 holiday calendar', (
   ]);
 });
 
+test('initialization fills missing rules while preserving edited and legacy commission rows', () => {
+  const { WorkbookSetup, Commission } = loadAppsScript();
+  const spreadsheet = fakeSpreadsheet();
+  const sheet = spreadsheet.insertSheet('Salary Rules');
+  sheet.getRange(1, 1, 1, 5).setValues([expectedHeaders['Salary Rules']]);
+  sheet.getRange(2, 1, 3, 5).setValues([
+    ['SALARY', 'SURVEY', 'after.basic', 17000, 'edited'],
+    ['COMMISSION', 'SURVEY', '1-200', 12, 'edited'],
+    ['COMMISSION', 'SALES', '4.00%-4.99%|1-19', 475, 'legacy bracket, edited']
+  ]);
+  WorkbookSetup.initialize(spreadsheet, policy);
+  const rows = sheet.getRange(2, 1, sheet.getLastRow() - 1, 5).getValues();
+  assert.equal(rows.find(row => row[0] === 'SALARY' && row[1] === 'SURVEY' && row[2] === 'after.basic')[3], 17000);
+  assert.equal(rows.find(row => row[0] === 'COMMISSION' && row[1] === 'SURVEY' && row[2] === '1-200')[3], 12);
+  assert.equal(rows.filter(row => row[0] === 'COMMISSION' && row[1] === 'SALES' && /4\.00%-4\.99%\|(0-19|1-19)/.test(row[2])).length, 1);
+  assert.equal(Commission.parseRows(rows).sales.length, 5);
+});
+
+test('history stores the original rules snapshot when later runs use edited rates', () => {
+  const { WorkbookSetup } = loadAppsScript();
+  const spreadsheet = fakeSpreadsheet();
+  const sheets = WorkbookSetup.ensureManagedSheets(spreadsheet);
+  const first = runRecord({ rulesSnapshot: { commissions: { survey: [{ min: 1, max: 200, rate: 10 }] } } });
+  WorkbookSetup.appendHistory(sheets, first, 'RUN-001:DRAFT:1');
+  const second = runRecord({ runId: 'RUN-002', rulesSnapshot: { commissions: { survey: [{ min: 1, max: 200, rate: 20 }] } } });
+  WorkbookSetup.appendHistory(sheets, second, 'RUN-002:DRAFT:1');
+  const stored = sheets['Payroll Runs'].getRange(2, 1, 2, 6).getValues().map(row => JSON.parse(row[5]));
+  assert.equal(stored[0].rulesSnapshot.commissions.survey[0].rate, 10);
+  assert.equal(stored[1].rulesSnapshot.commissions.survey[0].rate, 20);
+});
+
 test('initialization repairs appended source and audit key headers on an existing workbook', () => {
   const { WorkbookSetup } = loadAppsScript();
   const spreadsheet = fakeSpreadsheet();
@@ -301,6 +332,24 @@ test('production configuration check and initialization fail closed when acting 
   assert.equal(check.protection.errors[0].code, 'PROTECTED_EDITOR_CONFIGURATION_MISSING');
   assert.equal(api.initializeWorkbook().errors[0].code, 'PROTECTED_EDITOR_CONFIGURATION_MISSING');
   assert.equal(api.approveRun('RUN-001').valid, false);
+});
+
+test('configuration check reports malformed commission rows as structured rule issues', () => {
+  const spreadsheet = fakeSpreadsheet();
+  const { WorkbookSetup, MenuAndApi } = loadAppsScript({
+    SpreadsheetApp: { getActiveSpreadsheet: () => spreadsheet, ProtectionType: { SHEET: 'SHEET', RANGE: 'RANGE' } },
+    LockService: {},
+    PropertiesService: { getScriptProperties: () => ({ getProperty: () => 'approver@example.test' }) },
+    Session: { getActiveUser: () => ({ getEmail: () => 'approver@example.test' }) }
+  });
+  WorkbookSetup.initialize(spreadsheet, policy);
+  const rules = spreadsheet.getSheetByName('Salary Rules');
+  const rows = rules.getRange(2, 1, rules.getLastRow() - 1, 5).getValues();
+  const index = rows.findIndex(row => row[0] === 'COMMISSION' && row[1] === 'SALES' && row[2] === '4.00%-4.99%|30-39');
+  rules.getRange(index + 2, 4).setValues([['invalid']]);
+  const check = MenuAndApi.current().configurationCheck();
+  assert.equal(check.rules.valid, false);
+  assert.equal(check.rules.errors[0].code, 'INVALID_COMMISSION_RULE');
 });
 
 test('production API denies an unlisted caller before protected draft, override, or initialization writes', () => {

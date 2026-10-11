@@ -30,6 +30,7 @@ SalaryCalculator.PayrollEngine = (function () {
     var period = input.period, ledger = input.ledger || [], attendance = input.attendance;
     var performance = input.performance || employee.performance || {};
     var Period = SalaryCalculator.PayrollPeriod, Eligibility = SalaryCalculator.Eligibility, Commission = SalaryCalculator.Commission;
+    if (!rules.commissions) throw new Error('Validated commission rules are required');
     var window = Period.getEmploymentWindow(employee, period);
     var segments = Period.splitProbation(window, employee.firstWorkingDay);
     var components = {}, notes = [], warnings = [], candidates = [], eligibility = {};
@@ -81,10 +82,10 @@ SalaryCalculator.PayrollEngine = (function () {
     add('abs', absPaid, { days: window ? window.eligibleDays : 0, accrualAmount: round(absAccrual) });
     var commission = 0, detail = {};
     if (window) {
-      if (employee.department === 'SURVEY') commission = Commission.calculateSurvey(performance.transfers);
-      if (employee.department === 'RESERVATIONS') commission = Commission.calculateReservations(performance.transfers);
-      if (employee.department === 'SALES') { detail = Commission.calculateSales(performance.sales, performance.conversionRate); commission = detail.amount; }
-      if (employee.department === 'TDS') { detail = Commission.calculateTds(performance.agents); commission = detail.amount; }
+      if (employee.department === 'SURVEY') commission = Commission.calculateSurvey(performance.transfers, rules.commissions);
+      if (employee.department === 'RESERVATIONS') commission = Commission.calculateReservations(performance.transfers, rules.commissions);
+      if (employee.department === 'SALES') { detail = Commission.calculateSales(performance.sales, performance.conversionRate, rules.commissions); commission = detail.amount; }
+      if (employee.department === 'TDS') { detail = Commission.calculateTds(performance.agents, rules.commissions); commission = detail.amount; }
     }
     add('commission', commission, detail);
     var benefitLedger = ledger.filter(function (row) { return row.benefitKey; }).slice();

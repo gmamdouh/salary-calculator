@@ -10,7 +10,8 @@ function attendance(overrides = {}) { return { attendedScheduledDays: 17, leaveD
 function probationDecision(overrides = {}) { return { approved: true, asOfDate: '2026-09-30', ...overrides }; }
 function benefitLedger(...benefitKeys) { return benefitKeys.map(benefitKey => ({ benefitKey })); }
 function payrollRules(overrides = {}) {
-  return { salaries: {
+  const { Commission } = require('./load-apps-script').loadAppsScript();
+  return { commissions: Commission.parseRows(Commission.defaultRows()), salaries: {
     SURVEY: { before: { basic: 12000, abs: 2000 }, after: { basic: 15000, abs: 3000 } },
     RESERVATIONS: { before: { basic: 12000, abs: 2000 }, after: { basic: 15000, abs: 3000 } },
     SALES: { before: { basic: 16000, abs: 4000 }, after: { basic: 16000, abs: 4000 } },
@@ -32,7 +33,7 @@ function sourceRow(overrides = {}) {
 }
 function runRecord(overrides = {}) {
   return { runId: 'RUN-001', version: 1, payrollMonth: '2026-09', cutoff: '2026-09-30',
-    departmentScope: ['SURVEY'], rulesVersion: 'rules-v1', createdBy: 'hr@example.test',
+    departmentScope: ['SURVEY'], rulesVersion: 'rules-v1', rulesSnapshot: payrollRules(), createdBy: 'hr@example.test',
     sourceSnapshot: { employeeRows: [sourceRow()] }, inputs: [employee()], decisions: {},
     sourceConfigs: [mappingConfig()], warnings: [], acknowledgements: [],
     results: [{ employeeId: 'EMP-001', department: 'SURVEY', payrollMonth: '2026-09',

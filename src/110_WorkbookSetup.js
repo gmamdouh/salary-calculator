@@ -131,7 +131,6 @@ SalaryCalculator.WorkbookSetup = (function () {
   }
   function seedDefaultRules(sheetMap) {
     var sheet = sheetMap['Salary Rules'];
-    if (sheet.getLastRow() > 1) return;
     var rows = [];
     var salaries = {
       SURVEY: { before: [12000, 2000], after: [15000, 3000] },
@@ -146,27 +145,25 @@ SalaryCalculator.WorkbookSetup = (function () {
         rows.push(['SALARY', department, phase + '.abs', salaries[department][phase][1], 'Monthly EGP']);
       });
     });
-    [
-      ['COMMISSION', 'SURVEY', '1-200', '10', 'EGP per transfer; all transfers at rate'], ['COMMISSION', 'SURVEY', '201-300', '2000 + (transfers - 200) * 15', 'First 200 transfers at EGP 10, remaining transfers at EGP 15'],
-      ['COMMISSION', 'SURVEY', '301-350', '15', 'EGP per transfer; all transfers at rate'], ['COMMISSION', 'SURVEY', '351-400', '20', 'EGP per transfer; all transfers at rate'],
-      ['COMMISSION', 'SURVEY', '401-500', '25', 'EGP per transfer; all transfers at rate'], ['COMMISSION', 'SURVEY', '501+', '30', 'EGP per transfer; all transfers at rate'],
-      ['COMMISSION', 'RESERVATIONS', '1-200', '10', 'EGP per transfer, progressive'], ['COMMISSION', 'RESERVATIONS', '201-300', '15', 'EGP per transfer, progressive'],
-      ['COMMISSION', 'RESERVATIONS', '301-400', '20', 'EGP per transfer, progressive'], ['COMMISSION', 'RESERVATIONS', '401-500', '25', 'EGP per transfer, progressive'],
-      ['COMMISSION', 'RESERVATIONS', '501+', '30', 'EGP per transfer, progressive']
-    ].forEach(function (row) { rows.push(row); });
-    var conversionBands = ['0.00%-3.00%', '3.01%-3.99%', '4.00%-4.99%', '5.00%-5.99%', '6.00%+'];
-    var saleBrackets = ['1-19', '20-29', '30-39', '40-49', '50+'];
-    var salesRates = [[300, 300, 300, 300, 300], [400, 400, 400, 400, 400], [450, 550, 650, 750, 850], [550, 650, 750, 850, 1000], [650, 750, 950, 1100, 1300]];
-    conversionBands.forEach(function (band, bandIndex) {
-      saleBrackets.forEach(function (bracket, bracketIndex) {
-        rows.push(['COMMISSION', 'SALES', band + '|' + bracket, salesRates[bandIndex][bracketIndex], 'EGP per sale']);
-      });
-    });
-    rows.push(['COMMISSION', 'TDS', 'transfers > 75', 100, 'EGP per qualifying agent']);
+    SalaryCalculator.Commission.defaultRows().forEach(function (row) { rows.push(row); });
     rows.push(['CYCLE', 'SALES', 'quarterly payment months', '', 'Unset. Configure company-wide payout months before enabling quarterly ABS payment.']);
-    masterGateway().writeRows(sheet, 2, 1, rows);
-    masterGateway().format(sheet, 2, 4, 20, 1, '"EGP "#,##0.00');
-    masterGateway().format(sheet, 22, 4, 37, 1, '"EGP "#,##0.00');
+    var existing = sheet.getLastRow() > 1 ? sheet.getRange(2, 1, sheet.getLastRow() - 1, 5).getValues() : [];
+    function identity(row) { return String(row[0] || '').trim().toUpperCase() + '|' + String(row[1] || '').trim().toUpperCase() + '|' + String(row[2] || '').trim(); }
+    var identities = Object.create(null), customCommission = Object.create(null);
+    var defaults = Object.create(null);
+    rows.forEach(function (row) { defaults[identity(row)] = true; });
+    existing.forEach(function (row) {
+      var key = identity(row);
+      identities[key] = true;
+      if (String(row[0]).trim().toUpperCase() === 'COMMISSION' && !defaults[key] &&
+          !/^COMMISSION\|SALES\|.+\|1-19$/.test(key)) customCommission[String(row[1]).trim().toUpperCase()] = true;
+      if (String(row[0]).trim().toUpperCase() === 'COMMISSION' && row[1] === 'SALES' && /\|1-19$/.test(key))
+        identities[key.replace(/\|1-19$/, '|0-19')] = true;
+    });
+    var missing = rows.filter(function (row) { return !identities[identity(row)] &&
+      !(row[0] === 'COMMISSION' && customCommission[row[1]]); });
+    if (missing.length) masterGateway().writeRows(sheet, sheet.getLastRow() + 1, 1, missing);
+    return missing.length;
   }
   function seedHolidayCalendar(sheetMap) {
     var sheet = sheetMap['Holiday Calendar'];

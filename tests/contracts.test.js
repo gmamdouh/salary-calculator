@@ -52,3 +52,7 @@ for (const method of ['assertRules', 'assertDecisionSet']) {
     assert.doesNotThrow(() => calculator.Contracts[method]({ nested: { cutoffMode: 'OTHER', state: 'ACTIVE', runState: 'PENDING' } }));
   });
 }
+test('new run records require their complete rules snapshot', () => {
+  assert.throws(() => calculator.Contracts.assertRun(fixtures.runRecord({ rulesSnapshot: undefined })), /rulesSnapshot/);
+  assert.doesNotThrow(() => calculator.Contracts.assertRun(fixtures.runRecord()));
+});
