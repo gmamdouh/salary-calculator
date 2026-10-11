@@ -167,7 +167,7 @@ SalaryCalculator.SpreadsheetGateway = (function () {
         if (lastRow >= startRow && columns > 0) sheet.getRange(startRow, 1, lastRow - startRow + 1, columns).clearContent();
       }
       function protectRange(sheet, row, column, rows, columns, description) {
-        var range = sheet.getRange(row, column, rows, columns), type = typeof SpreadsheetApp !== 'undefined' ? SpreadsheetApp.ProtectionType.RANGE : undefined;
+        var range = sheet.getRange(row, column, rows, columns), type = typeof SpreadsheetApp !== 'undefined' ? SpreadsheetApp.ProtectionType.RANGE : 'RANGE';
         var existing = sheet.getProtections ? sheet.getProtections(type) : [];
         for (var index = 0; index < existing.length; index++) {
           if (existing[index].getDescription && existing[index].getDescription() === description) return existing[index];
@@ -177,16 +177,41 @@ SalaryCalculator.SpreadsheetGateway = (function () {
         protection.setWarningOnly(false);
         return protection;
       }
-      function protectSheet(sheet, description) {
-        var type = typeof SpreadsheetApp !== 'undefined' ? SpreadsheetApp.ProtectionType.SHEET : undefined;
+      function enforceEditors(protection, editorEmails) {
+        if (!Array.isArray(editorEmails) || !editorEmails.length || !protection.getEditors || !protection.addEditors ||
+            !protection.removeEditors || !protection.canDomainEdit || !protection.setDomainEdit ||
+            !protection.getUnprotectedRanges || !protection.setUnprotectedRanges || !protection.isWarningOnly ||
+            !protection.getTargetAudiences || !protection.removeTargetAudience)
+          throw new Error('Protected editor policy cannot be enforced');
+        var allowed = editorEmails.map(function (email) { return String(email).trim().toLowerCase(); });
+        protection.setWarningOnly(false);
+        protection.addEditors(editorEmails);
+        var removed = protection.getEditors().filter(function (editor) {
+          return allowed.indexOf(String(editor.getEmail()).trim().toLowerCase()) === -1;
+        });
+        if (removed.length) protection.removeEditors(removed);
+        if (protection.canDomainEdit()) protection.setDomainEdit(false);
+        protection.setUnprotectedRanges([]);
+        protection.getTargetAudiences().forEach(function (audience) {
+          var id = typeof audience === 'string' ? audience : audience && audience.getAudienceId ? audience.getAudienceId() : audience && audience.getId ? audience.getId() : '';
+          if (!id) throw new Error('Protected target audience cannot be identified');
+          protection.removeTargetAudience(id);
+        });
+        if (protection.isWarningOnly() || protection.canDomainEdit() || protection.getUnprotectedRanges().length ||
+            protection.getTargetAudiences().length || protection.getEditors().some(function (editor) {
+          return allowed.indexOf(String(editor.getEmail()).trim().toLowerCase()) === -1;
+        })) throw new Error('Protected editor policy could not be verified');
+        return protection;
+      }
+      function protectSheet(sheet, description, editorEmails) {
+        var type = typeof SpreadsheetApp !== 'undefined' ? SpreadsheetApp.ProtectionType.SHEET : 'SHEET';
         var existing = sheet.getProtections ? sheet.getProtections(type) : [];
         for (var index = 0; index < existing.length; index++) {
-          if (existing[index].getDescription && existing[index].getDescription() === description) return existing[index];
+          if (existing[index].getDescription && existing[index].getDescription() === description) return enforceEditors(existing[index], editorEmails);
         }
         var protection = sheet.protect();
         protection.setDescription(description);
-        protection.setWarningOnly(false);
-        return protection;
+        return enforceEditors(protection, editorEmails);
       }
       function format(sheet, row, column, rows, columns, pattern) {
         if (rows > 0 && columns > 0) sheet.getRange(row, column, rows, columns).setNumberFormat(pattern);
