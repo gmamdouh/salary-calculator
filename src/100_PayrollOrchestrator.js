@@ -13,14 +13,26 @@ SalaryCalculator.PayrollOrchestrator = (function () {
     });
     return result;
   }
-  function partialDepartmentsFingerprint(failedDepartments, departmentErrors) {
+  function partialDepartmentsFingerprint(failedDepartments, departmentErrors, failedEmployees, employeeErrors) {
     var departments = (failedDepartments || []).map(String).sort();
-    if (!departments.length) return null;
+    var employees = (failedEmployees || []).map(stableValue).sort(function (left, right) {
+      var a = JSON.stringify(left), b = JSON.stringify(right);
+      return a < b ? -1 : a > b ? 1 : 0;
+    });
+    if (!departments.length && !employees.length) return null;
     var errors = (departmentErrors || []).map(stableValue).sort(function (left, right) {
       var a = JSON.stringify(left), b = JSON.stringify(right);
       return a < b ? -1 : a > b ? 1 : 0;
     });
-    var serialized = JSON.stringify({ failedDepartments: departments, departmentErrors: errors });
+    var report = { failedDepartments: departments, departmentErrors: errors };
+    if (employees.length) {
+      report.failedEmployees = employees;
+      report.employeeErrors = (employeeErrors || []).map(stableValue).sort(function (left, right) {
+        var a = JSON.stringify(left), b = JSON.stringify(right);
+        return a < b ? -1 : a > b ? 1 : 0;
+      });
+    }
+    var serialized = JSON.stringify(report);
     var first = 2166136261, second = 2246822519;
     for (var index = 0; index < serialized.length; index++) {
       var code = serialized.charCodeAt(index);
@@ -82,6 +94,16 @@ SalaryCalculator.PayrollOrchestrator = (function () {
           today: (request.today || now()).slice(0, 10) });
         var employees = [], inputs = [], rosterIdentityInputs = [], referralIdentityIssues = [], sourceSnapshot = {}, sourceConfigs = [],
           attendanceByDepartment = Object.create(null), attendanceByEmployee = Object.create(null), deductionsByEmployee = Object.create(null);
+        function collectReferralIdentity(row, config) {
+          try { rosterIdentityInputs.push(SalaryCalculator.MappingConfig.normalizeEmployee(row, referralIdentityMapping(config))); }
+          catch (identityError) {
+            var referrerColumn = config.employeeColumns.referrerEmployeeId;
+            var referrerIndex = referrerColumn ? row.headers.indexOf(referrerColumn) : -1;
+            referralIdentityIssues.push({ sourceDepartment: config.department,
+              referrerEmployeeId: referrerIndex < 0 ? '' : String(row.values[referrerIndex] || '').trim(),
+              cause: identityError.message });
+          }
+        }
         var splitSourceReads = typeof sourceGateway.readEmployeeRoster === 'function' && typeof sourceGateway.readAttendanceRows === 'function';
         unique.forEach(function (department) {
           var config = configs.find(function (candidate) { return String(candidate.department || '').trim().toUpperCase() === department; });
@@ -102,16 +124,7 @@ SalaryCalculator.PayrollOrchestrator = (function () {
             sourceSnapshot[department] = { employeeRows: copy(employeeRows), attendanceRows: bundle ? copy(bundle.attendanceRows) : [],
               source: { spreadsheetId: config.spreadsheetId, leaveSpreadsheetId: config.leaveSpreadsheetId,
                 employeeTab: config.employeeTab, attendanceTab: config.attendanceTab } };
-            employeeRows.forEach(function (row) {
-              try { rosterIdentityInputs.push(SalaryCalculator.MappingConfig.normalizeEmployee(row, referralIdentityMapping(config))); }
-              catch (identityError) {
-                var referrerColumn = config.employeeColumns.referrerEmployeeId;
-                var referrerIndex = referrerColumn ? row.headers.indexOf(referrerColumn) : -1;
-                referralIdentityIssues.push({ sourceDepartment: department,
-                  referrerEmployeeId: referrerIndex < 0 ? '' : String(row.values[referrerIndex] || '').trim(),
-                  cause: identityError.message });
-              }
-            });
+            employeeRows.forEach(function (row) { collectReferralIdentity(row, config); });
             var deptEmployees = employeeRows.map(function (row) { return SalaryCalculator.MappingConfig.normalizeEmployee(row, config); });
             var ids = Object.create(null), localDuplicateIssues = [];
             deptEmployees.forEach(function (employee) {
@@ -214,9 +227,8 @@ SalaryCalculator.PayrollOrchestrator = (function () {
             if (!access || access.valid !== true) throw Object.assign(new Error('Employee roster access failed'), { issues: access && access.errors || [] });
             var rosterRows = typeof sourceGateway.readEmployeeRoster === 'function' ?
               sourceGateway.readEmployeeRoster(identityMapping, period) : sourceGateway.readDepartment(identityMapping, period).employeeRows;
-            referralInputs = referralInputs.concat(rosterRows.map(function (row) {
-              return SalaryCalculator.MappingConfig.normalizeEmployee(row, identityMapping);
-            }));
+            rosterRows.forEach(function (row) { collectReferralIdentity(row, referralConfig); });
+            referralInputs = rosterIdentityInputs.slice();
             referralSourceSnapshot[sourceDepartment] = { employeeRows: copy(rosterRows),
               source: { spreadsheetId: referralConfig.spreadsheetId, employeeTab: referralConfig.employeeTab } };
           } catch (error) {
@@ -228,15 +240,15 @@ SalaryCalculator.PayrollOrchestrator = (function () {
             });
           }
         });
-        var selectedById = Object.create(null), directoryById = Object.create(null);
+        var selectedById = Object.create(null), directoryById = Object.create(null), employeeErrors = [];
         inputs.forEach(function (employee) { selectedById[employee.employeeId] = employee; });
         referralIdentityIssues.forEach(function (problem) {
           var referrer = selectedById[problem.referrerEmployeeId];
           if (!referrer) return;
-          referralUnavailable = true;
-          errors.push(issue('REFERRAL_SOURCE_UNAVAILABLE', 'A referred employee identity cannot be verified.',
+          var identityIssue = issue('REFERRAL_SOURCE_UNAVAILABLE', 'A referred employee identity cannot be verified.',
             referrer.department, { employeeId: referrer.employeeId,
-              sourceDepartment: problem.sourceDepartment, cause: problem.cause }));
+              sourceDepartment: problem.sourceDepartment, cause: problem.cause });
+          errors.push(identityIssue); employeeErrors.push(identityIssue);
         });
         referralInputs.forEach(function (employee) {
           (directoryById[employee.employeeId] || (directoryById[employee.employeeId] = [])).push(employee);
@@ -247,11 +259,19 @@ SalaryCalculator.PayrollOrchestrator = (function () {
           entries.forEach(function (entry) {
             var referrer = selectedById[entry.referrerEmployeeId];
             if (!referrer) return;
-            referralUnavailable = true;
-            errors.push(issue('REFERRAL_EMPLOYEE_ID_COLLISION', 'A referred Employee ID is duplicated in the referral directory.',
-              referrer.department, { employeeId: referrer.employeeId, referredEmployeeId: employeeId }));
+            var collisionIssue = issue('REFERRAL_EMPLOYEE_ID_COLLISION', 'A referred Employee ID is duplicated in the referral directory.',
+              referrer.department, { employeeId: referrer.employeeId, referredEmployeeId: employeeId });
+            errors.push(collisionIssue); employeeErrors.push(collisionIssue);
           });
         });
+        var failedEmployees = [], failedEmployeeIds = Object.create(null);
+        employeeErrors.forEach(function (item) {
+          if (failedEmployeeIds[item.employeeId]) return;
+          failedEmployeeIds[item.employeeId] = true;
+          failedEmployees.push({ department: item.department, employeeId: item.employeeId });
+        });
+        inputs = inputs.filter(function (employee) { return !failedEmployeeIds[employee.employeeId]; });
+        employees = employees.filter(function (employee) { return !failedEmployeeIds[employee.employeeId]; });
 
         var decisionRequirements = [], benefitLedger = dependencies.getBenefitLedger ? dependencies.getBenefitLedger() : [];
         inputs.forEach(function (employee) {
@@ -267,12 +287,15 @@ SalaryCalculator.PayrollOrchestrator = (function () {
         });
         var allMode = request.departmentScope.indexOf('ALL') !== -1;
         var failedDepartments = unique.filter(function (department) { return failed[department]; });
-        return { valid: !referralUnavailable && (errors.length === 0 || (allMode && inputs.length > 0)), errors: errors, warnings: warnings, payrollMonth: request.payrollMonth,
+        var departmentErrors = errors.filter(function (item) { return employeeErrors.indexOf(item) === -1; });
+        return { valid: !referralUnavailable && (departmentErrors.length === 0 || (allMode && inputs.length > 0)) &&
+            (inputs.length > 0 || !failedEmployees.length), errors: errors, warnings: warnings, payrollMonth: request.payrollMonth,
           cutoffMode: request.cutoffMode, departmentScope: unique, period: period, employees: employees, inputs: inputs,
           attendanceByEmployee: attendanceByEmployee, deductionsByEmployee: deductionsByEmployee, sourceSnapshot: sourceSnapshot, sourceConfigs: sourceConfigs,
           referralInputs: referralInputs, referralSourceSnapshot: referralSourceSnapshot,
-          failedDepartments: failedDepartments, departmentErrors: errors,
-          partialDepartmentsFingerprint: partialDepartmentsFingerprint(failedDepartments, errors), runId: runId(), decisions: copy(request.decisions || {}),
+          failedDepartments: failedDepartments, departmentErrors: departmentErrors, failedEmployees: failedEmployees, employeeErrors: employeeErrors,
+          partialDepartmentsFingerprint: partialDepartmentsFingerprint(failedDepartments, departmentErrors, failedEmployees, employeeErrors),
+          runId: runId(), decisions: copy(request.decisions || {}),
           decisionRequirements: decisionRequirements, unresolvedDecisionCount: decisionRequirements.length };
       } catch (error) {
         errors.push(issue('VALIDATION_ERROR', error.message || 'Payroll validation failed.'));
@@ -281,12 +304,15 @@ SalaryCalculator.PayrollOrchestrator = (function () {
     }
     function calculateDraft(request) {
       var report = validateRequest(request);
-      if (!report.valid || !report.inputs.length) return { valid: false, state: 'BLOCKED', runId: report.runId || null, errors: report.errors, warnings: report.warnings || [] };
-      if (report.failedDepartments.length && !(request.acknowledgements &&
+      if (!report.valid || !report.inputs.length) return { valid: false, state: 'BLOCKED', runId: report.runId || null,
+        errors: report.errors, warnings: report.warnings || [], failedEmployees: report.failedEmployees || [],
+        employeeErrors: report.employeeErrors || [] };
+      if ((report.failedDepartments.length || report.failedEmployees.length) && !(request.acknowledgements &&
           request.acknowledgements.partialDepartmentsFingerprint === report.partialDepartmentsFingerprint)) {
         return { valid: false, state: 'BLOCKED', runId: report.runId,
-          errors: [issue('ACK_REQUIRED', 'The omitted-department report changed or has not been acknowledged.')], warnings: [],
+          errors: [issue('ACK_REQUIRED', 'The omission report changed or has not been acknowledged.')], warnings: [],
           failedDepartments: report.failedDepartments, departmentErrors: report.departmentErrors,
+          failedEmployees: report.failedEmployees, employeeErrors: report.employeeErrors,
           partialDepartmentsFingerprint: report.partialDepartmentsFingerprint, employees: report.employees };
       }
       var decisions = copy(request.decisions || report.decisions || {});
@@ -398,8 +424,10 @@ SalaryCalculator.PayrollOrchestrator = (function () {
         }
       }
       var persistedAcknowledgements = copy(request.acknowledgements || {});
-      var partialDepartmentsReport = report.failedDepartments.length ? { failedDepartments: copy(report.failedDepartments),
-        departmentErrors: copy(report.departmentErrors), fingerprint: report.partialDepartmentsFingerprint } : null;
+      var partialDepartmentsReport = report.failedDepartments.length || report.failedEmployees.length ? {
+        failedDepartments: copy(report.failedDepartments), departmentErrors: copy(report.departmentErrors),
+        failedEmployees: copy(report.failedEmployees), employeeErrors: copy(report.employeeErrors),
+        fingerprint: report.partialDepartmentsFingerprint } : null;
       if (partialDepartmentsReport) {
         persistedAcknowledgements.partialDepartmentsFingerprint = report.partialDepartmentsFingerprint;
         persistedAcknowledgements.partialDepartmentsReport = partialDepartmentsReport;
@@ -408,12 +436,14 @@ SalaryCalculator.PayrollOrchestrator = (function () {
         cutoffMode: report.cutoffMode, departmentScope: report.departmentScope, rulesVersion: dependencies.rulesVersion || 'unknown',
         createdBy: actor(), createdAt: timestamp, sourceSnapshot: report.sourceSnapshot, sourceConfigs: report.sourceConfigs,
         inputs: report.inputs, referralSourceSnapshot: report.referralSourceSnapshot, decisions: decisions, ocrAuditEvidence: auditEvidence, results: results,
-        failedDepartments: report.failedDepartments || [], departmentErrors: report.departmentErrors || report.errors || [],
+        failedDepartments: report.failedDepartments || [], departmentErrors: report.departmentErrors || [],
+        failedEmployees: report.failedEmployees || [], employeeErrors: report.employeeErrors || [],
         partialDepartmentsFingerprint: report.partialDepartmentsFingerprint || null,
         warnings: report.warnings, acknowledgements: persistedAcknowledgements };
       try {
         return Object.assign({ valid: true, errors: [], blockingErrors: [], failedDepartments: run.failedDepartments,
-          departmentErrors: run.departmentErrors }, repository.createDraft(run));
+          departmentErrors: run.departmentErrors, failedEmployees: run.failedEmployees,
+          employeeErrors: run.employeeErrors }, repository.createDraft(run));
       } catch (error) {
         return { valid: false, state: 'BLOCKED', runId: id,
           errors: error.issues || [issue('DRAFT_SAVE_FAILED', error.message || 'The draft could not be saved.')], warnings: [] };
@@ -422,13 +452,15 @@ SalaryCalculator.PayrollOrchestrator = (function () {
     function approveRun(id, approver) {
       try {
         var run = repository.getRun(id);
-        var omittedDepartmentsFingerprint = partialDepartmentsFingerprint(run.failedDepartments, run.departmentErrors);
+        var omittedDepartmentsFingerprint = partialDepartmentsFingerprint(run.failedDepartments, run.departmentErrors,
+          run.failedEmployees, run.employeeErrors);
         var savedAcknowledgement = run.acknowledgements || {}, savedReport = savedAcknowledgement.partialDepartmentsReport;
-        if ((run.failedDepartments || []).length && (!savedReport ||
+        if (((run.failedDepartments || []).length || (run.failedEmployees || []).length) && (!savedReport ||
             savedAcknowledgement.partialDepartmentsFingerprint !== omittedDepartmentsFingerprint ||
             run.partialDepartmentsFingerprint !== omittedDepartmentsFingerprint ||
             savedReport.fingerprint !== omittedDepartmentsFingerprint ||
-            partialDepartmentsFingerprint(savedReport.failedDepartments, savedReport.departmentErrors) !== omittedDepartmentsFingerprint)) {
+            partialDepartmentsFingerprint(savedReport.failedDepartments, savedReport.departmentErrors,
+              savedReport.failedEmployees, savedReport.employeeErrors) !== omittedDepartmentsFingerprint)) {
           return { valid: false, state: run.state, runId: id,
             errors: [issue('ACK_REQUIRED', 'This partial run has no matching saved acknowledgment of its omission report.') ] };
         }

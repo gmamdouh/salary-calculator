@@ -461,13 +461,54 @@ test('partial All run pays a healthy referrer from a failed department roster wi
   assert.equal(run.results[0].components.referral.amount, 10000);
 });
 
-test('partial All run flags only the affected referrer when a failed department referral identity is invalid', () => {
-  const { orchestrator } = referralFixture({ referredJoined: 'invalid-date', extraSurvey: true });
-  const report = orchestrator.validateRequest({ payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['ALL'] });
-  assert.equal(report.valid, false);
-  assert.equal(report.errors.some(error => error.code === 'REFERRAL_SOURCE_UNAVAILABLE' &&
+test('invalid referral identity omits only the affected referrer and requires an acknowledged employee report', () => {
+  const { orchestrator, repository } = referralFixture({ referredJoined: 'invalid-date', extraSurvey: true });
+  const request = { payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['SURVEY'] };
+  const report = orchestrator.validateRequest(request);
+  assert.equal(report.valid, true, JSON.stringify(plain(report)));
+  assert.deepEqual(plain(report.failedEmployees), [{ department: 'SURVEY', employeeId: 'EMP-001' }]);
+  assert.deepEqual(plain(report.inputs.map(employee => employee.employeeId)), ['EMP-003']);
+  assert.equal(report.employeeErrors.some(error => error.code === 'REFERRAL_SOURCE_UNAVAILABLE' &&
     error.employeeId === 'EMP-001' && error.sourceDepartment === 'RESERVATIONS'), true);
-  assert.equal(report.errors.some(error => error.code === 'REFERRAL_SOURCE_UNAVAILABLE' && error.employeeId === 'EMP-003'), false);
+  assert.equal(report.employeeErrors.some(error => error.employeeId === 'EMP-003'), false);
+  assert.equal(typeof report.partialDepartmentsFingerprint, 'string');
+
+  for (const acknowledgements of [{}, { partialDepartmentsFingerprint: 'wrong' }]) {
+    const blocked = orchestrator.calculateDraft({ ...request, acknowledgements });
+    assert.equal(blocked.valid, false);
+    assert.equal(blocked.errors[0].code, 'ACK_REQUIRED');
+    assert.deepEqual(plain(blocked.failedEmployees), [{ department: 'SURVEY', employeeId: 'EMP-001' }]);
+  }
+  const run = orchestrator.calculateDraft({ ...request, acknowledgements: {
+    partialDepartmentsFingerprint: report.partialDepartmentsFingerprint
+  } });
+  assert.equal(run.valid, true, JSON.stringify(plain(run)));
+  assert.deepEqual(plain(run.results.map(result => result.employeeId)), ['EMP-003']);
+  assert.deepEqual(plain(run.failedEmployees), [{ department: 'SURVEY', employeeId: 'EMP-001' }]);
+  assert.deepEqual(plain(run.employeeErrors), plain(report.employeeErrors));
+  assert.deepEqual(plain(run.acknowledgements.partialDepartmentsReport.failedEmployees), plain(report.failedEmployees));
+  assert.deepEqual(plain(run.acknowledgements.partialDepartmentsReport.employeeErrors), plain(report.employeeErrors));
+  repository.getRun = () => ({ ...run, employeeErrors: run.employeeErrors.concat({
+    code: 'REFERRAL_SOURCE_UNAVAILABLE', department: 'SURVEY', employeeId: 'EMP-003', message: 'Changed after draft'
+  }) });
+  const alteredApproval = orchestrator.approveRun(run.runId, 'approver@example.test');
+  assert.equal(alteredApproval.valid, false);
+  assert.equal(alteredApproval.errors[0].code, 'ACK_REQUIRED');
+});
+
+test('partial All run reports both failed department and affected referrer while drafting the unrelated employee', () => {
+  const { orchestrator } = referralFixture({ referredJoined: 'invalid-date', extraSurvey: true });
+  const request = { payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['ALL'] };
+  const report = orchestrator.validateRequest(request);
+  assert.equal(report.valid, true, JSON.stringify(plain(report)));
+  assert.equal(report.failedDepartments.includes('RESERVATIONS'), true);
+  assert.deepEqual(plain(report.failedEmployees), [{ department: 'SURVEY', employeeId: 'EMP-001' }]);
+  assert.equal(orchestrator.calculateDraft(request).errors[0].code, 'ACK_REQUIRED');
+  const run = orchestrator.calculateDraft({ ...request, acknowledgements: {
+    partialDepartmentsFingerprint: report.partialDepartmentsFingerprint
+  } });
+  assert.equal(run.valid, true, JSON.stringify(plain(run)));
+  assert.deepEqual(plain(run.results.map(result => result.employeeId)), ['EMP-003']);
 });
 
 test('unreadable cross-department referral roster blocks a selected referrer with structured error', () => {
@@ -478,6 +519,11 @@ test('unreadable cross-department referral roster blocks a selected referrer wit
   assert.equal(report.errors[0].department, 'SURVEY');
   assert.equal(report.errors[0].employeeId, 'EMP-001');
   assert.equal(report.errors[0].sourceDepartment, 'RESERVATIONS');
+  assert.deepEqual(plain(report.failedEmployees), [{ department: 'SURVEY', employeeId: 'EMP-001' }]);
+  const draft = orchestrator.calculateDraft({ payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['SURVEY'],
+    acknowledgements: { partialDepartmentsFingerprint: report.partialDepartmentsFingerprint } });
+  assert.equal(draft.valid, false);
+  assert.equal(draft.state, 'BLOCKED');
 });
 
 test('former referrer receives one source-derived bonus only in later final-payroll period', () => {
