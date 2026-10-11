@@ -143,14 +143,15 @@
           retryable = !!draft.retryableApproval;
           ready = draft.state === 'DRAFT' && !frozen;
         },
-        markDirty: function () { dirty = true; },
+        markDirty: function () { if (ready && !saving && !approving && !frozen) dirty = true; },
         beginSave: function () { saving = true; dirty = true; },
-        saveFailed: function () { saving = false; dirty = true; },
+        saveFailed: function () { saving = false; dirty = true; ready = false; },
         beginApproval: function () { approving = true; },
         approvalFailed: function (canRetry) { approving = false; if (canRetry) { frozen = true; retryable = true; } else ready = false; },
         approvalSucceeded: function () { approving = false; frozen = true; retryable = false; ready = false; },
         canApprove: function () { return ready && !dirty && !saving && !approving && !frozen; },
-        canRetry: function () { return retryable && !approving; },
+        canEdit: function () { return ready && !saving && !approving && !frozen; },
+        canRetry: function () { return retryable && !dirty && !saving && !approving; },
         isFrozen: function () { return frozen; },
         isSaving: function () { return saving; },
         runId: function () { return runId; }
@@ -166,6 +167,9 @@
     })) return false;
     return !!(result && (result.resumable || result.writeBackStatus === 'FAILED')) ||
       !!(saved && saved.valid && saved.retryableApproval);
+  }
+  function PayrollSidebarCanRestoreEdits(saved) {
+    return !!(saved && saved.valid && saved.state === 'DRAFT' && !saved.retryableApproval);
   }
 </script>
 <script>
@@ -349,6 +353,10 @@
       byId('approveRun').disabled = !canApprove();
       byId('retryApproval').hidden = !draftGate.canRetry();
       byId('retryApproval').disabled = !draftGate.canRetry();
+      byId('saveDraftEdits').disabled = !draftGate.canEdit();
+      document.querySelectorAll('[data-amount], [data-reason]').forEach(function (input) {
+        input.disabled = !draftGate.canEdit();
+      });
     }
     function renderOmissionNotice() {
       var message = partialRunNotice.message(), required = partialRunNotice.isRequired();
@@ -415,8 +423,8 @@
         var total = document.createElement('div'); total.className = 'draft-total';
         total.textContent = employee.americanName + ' total: ' + String(employee.total); container.appendChild(total);
       });
-      renderApprovalSummary(result.retryableApproval ? 'Approval is frozen after a recoverable failure. Retry the same run.' :
-        'Draft is ready for review.');
+      renderApprovalSummary(result.retryableApproval ? 'Approval is frozen. Retry approval of the saved frozen values.' :
+        result.state === 'APPROVED' ? 'Payroll approved.' : 'Draft is ready for review.');
       refreshApproval();
     }
     byId('loadSetup').addEventListener('click', function () {
@@ -542,7 +550,7 @@
       invokeServer('calculateDraft', request).then(renderDraft).catch(function (error) { draftGate.load(null); showError(error.message || error); refreshApproval(); });
     });
     byId('saveDraftEdits').addEventListener('click', function () {
-      if (!state.draft || draftGate.isFrozen() || draftGate.isSaving()) { showError('An editable draft is required.'); return; }
+      if (!state.draft || !draftGate.canEdit()) { showError('An editable draft is required.'); return; }
       clearError(); var changed = Array.prototype.filter.call(document.querySelectorAll('[data-amount]'), function (input) {
         var reason = byId(input.dataset.reasonId);
         return Number(input.value) !== Number(input.dataset.persisted) || reason.value.trim() !== reason.dataset.persistedReason;
@@ -552,8 +560,6 @@
         employeeId: row.dataset.employeeId, component: row.dataset.component, value: input.value,
         reason: byId(input.dataset.reasonId).value.trim() }; });
       draftGate.beginSave(); refreshApproval();
-      document.querySelectorAll('[data-amount], [data-reason]').forEach(function (input) { input.disabled = true; });
-      byId('saveDraftEdits').disabled = true;
       var chain = Promise.resolve();
       changed.forEach(function (input) { chain = chain.then(function () {
         var row = input.closest('.draft-row');
@@ -568,8 +574,16 @@
           renderDraft(saved); goTo('approve');
         }).catch(function (error) {
           return invokeServer('getRunState', { runId: state.draft.runId }).then(function (saved) {
-            if (!saved || saved.valid === false) { draftGate.saveFailed(); return; }
-            renderDraft(saved); goTo('draft');
+            if (!saved || saved.valid === false) {
+              draftGate.saveFailed(); setStatus('Saved values could not be verified. Resume this run before editing.'); return;
+            }
+            renderDraft(saved);
+            if (!PayrollSidebarCanRestoreEdits(saved)) {
+              goTo('approve');
+              if (saved.retryableApproval) renderApprovalSummary('Pending edits were discarded because approval froze this run. Retry approval of the saved frozen values.');
+              return;
+            }
+            goTo('draft');
             desiredChanges.forEach(function (change) {
               document.querySelectorAll('.draft-row').forEach(function (row) {
                 if (row.dataset.employeeId !== change.employeeId || row.dataset.component !== change.component) return;
@@ -578,13 +592,14 @@
               });
             });
             draftGate.markDirty();
-          }).catch(function () { draftGate.saveFailed(); }).then(function () {
+          }).catch(function () {
+            draftGate.saveFailed(); setStatus('Saved values could not be verified. Resume this run before editing.');
+          }).then(function () {
             showError(error.message || error); refreshApproval();
           });
         })
         .finally(function () {
-          document.querySelectorAll('[data-amount], [data-reason]').forEach(function (input) { input.disabled = false; });
-          byId('saveDraftEdits').disabled = false;
+          refreshApproval();
         });
     });
     function submitApproval(retry) {
@@ -599,19 +614,21 @@
         }
         return invokeServer('getRunState', { runId: runId }).catch(function () { return null; }).then(function (saved) {
           var retryable = PayrollSidebarApprovalRetryable(result, saved);
+          if (saved && saved.valid && retryable) renderDraft(saved);
           draftGate.approvalFailed(retryable);
           state.blockingErrors = result && (result.blockingErrors || result.errors) || [{ message: 'Approval failed.' }];
           showError(state.blockingErrors);
-          renderApprovalSummary(retryable ? 'Approval stopped during a recoverable write. Retry this saved run.' :
+          renderApprovalSummary(retryable ? 'Approval stopped during a recoverable write. Retry approval of the saved frozen values.' :
             'Approval is blocked. Review the reported input errors.');
           refreshApproval();
         });
       }).catch(function (error) {
         invokeServer('getRunState', { runId: runId }).then(function (saved) {
           var retryable = !!(saved && saved.valid && saved.retryableApproval);
+          if (saved && saved.valid && retryable) renderDraft(saved);
           draftGate.approvalFailed(retryable);
           showError(error.message || error);
-          renderApprovalSummary(retryable ? 'Approval stopped during a recoverable write. Retry this saved run.' : 'Approval failed.');
+          renderApprovalSummary(retryable ? 'Approval stopped during a recoverable write. Retry approval of the saved frozen values.' : 'Approval failed.');
           refreshApproval();
         }).catch(function () { draftGate.approvalFailed(false); showError(error.message || error); refreshApproval(); });
       });

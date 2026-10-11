@@ -79,7 +79,7 @@ test('draft approval stays locked after an edit or failed save until an authorit
   assert.equal(gate.canApprove(), false);
   gate.saveFailed();
   assert.equal(gate.canApprove(), false);
-  gate.beginSave();
+  assert.equal(gate.canEdit(), false);
   gate.load({ valid: true, runId: 'RUN-1', state: 'DRAFT' });
   assert.equal(gate.canApprove(), true);
 });
@@ -103,6 +103,34 @@ test('a frozen approval can retry the same run after failure and sidebar reload'
   reopened.load(null);
   assert.equal(reopened.isFrozen(), false);
   assert.equal(reopened.runId(), null);
+});
+
+test('draft values can be edited only before approval starts and a frozen retry uses saved values', () => {
+  const html = fs.readFileSync(require.resolve('../src/SidebarScripts.html'), 'utf8');
+  const firstScript = html.match(/<script>([\s\S]*?)<\/script>/);
+  const context = vm.createContext({});
+  vm.runInContext(firstScript[1], context);
+  const gate = context.PayrollSidebarDraftGate.create();
+  gate.load({ valid: true, runId: 'RUN-1', state: 'DRAFT' });
+  assert.equal(gate.canEdit(), true);
+  gate.beginApproval();
+  assert.equal(gate.canEdit(), false);
+  gate.approvalFailed(true);
+  assert.equal(gate.canEdit(), false);
+  assert.equal(gate.canRetry(), true);
+  gate.markDirty();
+  assert.equal(gate.canRetry(), true);
+});
+
+test('save failure restores pending edits only when the authoritative run is still editable', () => {
+  const html = fs.readFileSync(require.resolve('../src/SidebarScripts.html'), 'utf8');
+  const firstScript = html.match(/<script>([\s\S]*?)<\/script>/);
+  const context = vm.createContext({});
+  vm.runInContext(firstScript[1], context);
+  const restore = context.PayrollSidebarCanRestoreEdits;
+  assert.equal(restore({ valid: true, state: 'DRAFT', retryableApproval: false }), true);
+  assert.equal(restore({ valid: true, state: 'DRAFT', retryableApproval: true }), false);
+  assert.equal(restore({ valid: true, state: 'APPROVED', retryableApproval: true }), false);
 });
 
 test('approval retry excludes acknowledgment and authorization failures even if the run has a checkpoint', () => {
@@ -170,6 +198,18 @@ test('sidebar wires dated holiday payload, authoritative saves, retry and resume
   assert.match(scripts, /draftGate\.markDirty\(\)/);
   assert.match(scripts, /submitApproval\(true\)/);
   assert.doesNotMatch(scripts, /selectDepartment\('SALES'\)/);
+});
+
+test('frozen sidebar controls cannot expose unsaved edits while Retry approves saved values', () => {
+  const sidebar = fs.readFileSync(require.resolve('../src/PayrollSidebar.html'), 'utf8');
+  const scripts = fs.readFileSync(require.resolve('../src/SidebarScripts.html'), 'utf8');
+  assert.match(sidebar, /Retry approval of frozen values/);
+  assert.match(scripts, /byId\('saveDraftEdits'\)\.disabled = !draftGate\.canEdit\(\)/);
+  assert.match(scripts, /input\.disabled = !draftGate\.canEdit\(\)/);
+  assert.match(scripts, /if \(!PayrollSidebarCanRestoreEdits\(saved\)\)/);
+  assert.ok(scripts.indexOf('if (!PayrollSidebarCanRestoreEdits(saved))') < scripts.indexOf('desiredChanges.forEach(function (change)'));
+  assert.match(scripts, /function submitApproval[\s\S]*?if \(saved && saved\.valid && retryable\) renderDraft\(saved\)/);
+  assert.doesNotMatch(scripts, /input\.disabled = false/);
 });
 
 test('new name reports retain earlier unresolved attempts independently', () => {
