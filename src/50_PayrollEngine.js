@@ -115,9 +115,10 @@ SalaryCalculator.PayrollEngine = (function () {
       if (!window || item.date < window.startDate || item.date > window.endDate) throw new Error('Extra-day date is outside employment window');
     });
     add('extraDays', extra.byDate.reduce(function (total,item) { return total + item.units * phaseRate(item.date); }, 0), { units: extra.units, byDate: extra.byDate });
-    var finalSettlement = !!(window && employee.lastWorkingDay && employee.lastWorkingDay <= period.endDate);
-    var annualDays = finalSettlement ? money(employee.annualLeaveBalance === undefined ? 0 : employee.annualLeaveBalance,'annualLeaveBalance') : 0;
-    add('annualBalance', finalSettlement ? annualDays * phaseRate(employee.lastWorkingDay) : 0, { days: annualDays });
+    var finalSettlement = !!(employee.lastWorkingDay && employee.lastWorkingDay <= period.endDate &&
+      (window || finalPaymentInPeriod));
+    var annualDays = window && finalSettlement ? money(employee.annualLeaveBalance === undefined ? 0 : employee.annualLeaveBalance,'annualLeaveBalance') : 0;
+    add('annualBalance', annualDays ? annualDays * phaseRate(employee.lastWorkingDay) : 0, { days: annualDays });
     function adjustments(items, approvedOnly) {
       return (items || []).reduce(function (sum, item) {
         money(item.amount,'adjustment');

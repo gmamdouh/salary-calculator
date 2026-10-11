@@ -48,6 +48,13 @@ SalaryCalculator.PayrollOrchestrator = (function () {
           (attempt.matches || []).some(function (item) { return item.confirmed !== true; });
       });
     }
+    function referralIdentityMapping(config) {
+      var identityColumns = {};
+      ['employeeId', 'americanName', 'firstWorkingDay', 'lastWorkingDay', 'finalPayrollPaymentDate', 'referrerEmployeeId'].forEach(function (field) {
+        if (config.employeeColumns[field]) identityColumns[field] = config.employeeColumns[field];
+      });
+      return Object.assign({}, config, { employeeColumns: identityColumns });
+    }
     function validateRequest(request) {
       request = request || {};
       var errors = [], warnings = [], configs, period, failed = Object.create(null);
@@ -73,7 +80,7 @@ SalaryCalculator.PayrollOrchestrator = (function () {
         if (dependencies.buildPeriod) period = dependencies.buildPeriod(request);
         else period = SalaryCalculator.PayrollPeriod.buildPeriod({ payrollMonth: request.payrollMonth, cutoffMode: request.cutoffMode,
           today: (request.today || now()).slice(0, 10) });
-        var employees = [], inputs = [], sourceSnapshot = {}, sourceConfigs = [],
+        var employees = [], inputs = [], rosterIdentityInputs = [], referralIdentityIssues = [], sourceSnapshot = {}, sourceConfigs = [],
           attendanceByDepartment = Object.create(null), attendanceByEmployee = Object.create(null), deductionsByEmployee = Object.create(null);
         var splitSourceReads = typeof sourceGateway.readEmployeeRoster === 'function' && typeof sourceGateway.readAttendanceRows === 'function';
         unique.forEach(function (department) {
@@ -95,6 +102,16 @@ SalaryCalculator.PayrollOrchestrator = (function () {
             sourceSnapshot[department] = { employeeRows: copy(employeeRows), attendanceRows: bundle ? copy(bundle.attendanceRows) : [],
               source: { spreadsheetId: config.spreadsheetId, leaveSpreadsheetId: config.leaveSpreadsheetId,
                 employeeTab: config.employeeTab, attendanceTab: config.attendanceTab } };
+            employeeRows.forEach(function (row) {
+              try { rosterIdentityInputs.push(SalaryCalculator.MappingConfig.normalizeEmployee(row, referralIdentityMapping(config))); }
+              catch (identityError) {
+                var referrerColumn = config.employeeColumns.referrerEmployeeId;
+                var referrerIndex = referrerColumn ? row.headers.indexOf(referrerColumn) : -1;
+                referralIdentityIssues.push({ sourceDepartment: department,
+                  referrerEmployeeId: referrerIndex < 0 ? '' : String(row.values[referrerIndex] || '').trim(),
+                  cause: identityError.message });
+              }
+            });
             var deptEmployees = employeeRows.map(function (row) { return SalaryCalculator.MappingConfig.normalizeEmployee(row, config); });
             var ids = Object.create(null), localDuplicateIssues = [];
             deptEmployees.forEach(function (employee) {
@@ -186,17 +203,13 @@ SalaryCalculator.PayrollOrchestrator = (function () {
 
         // Referral relationships are roster facts, not client decisions. A scoped payroll still
         // needs the other departments' employee rosters, but never their attendance or performance.
-        var referralInputs = inputs.slice(), referralSourceSnapshot = {}, referralUnavailable = false;
+        var referralInputs = rosterIdentityInputs.slice(), referralSourceSnapshot = {}, referralUnavailable = false;
         if (inputs.length) configs.forEach(function (rawConfig) {
           var sourceDepartment = String(rawConfig.department || '').trim().toUpperCase();
           if (unique.indexOf(sourceDepartment) !== -1) return;
           try {
             var referralConfig = SalaryCalculator.MappingConfig.parse([rawConfig])[0];
-            var identityColumns = {};
-            ['employeeId', 'americanName', 'firstWorkingDay', 'lastWorkingDay', 'finalPayrollPaymentDate', 'referrerEmployeeId'].forEach(function (field) {
-              if (referralConfig.employeeColumns[field]) identityColumns[field] = referralConfig.employeeColumns[field];
-            });
-            var identityMapping = Object.assign({}, referralConfig, { employeeColumns: identityColumns });
+            var identityMapping = referralIdentityMapping(referralConfig);
             var access = sourceGateway.validateAccess(identityMapping, 'employee');
             if (!access || access.valid !== true) throw Object.assign(new Error('Employee roster access failed'), { issues: access && access.errors || [] });
             var rosterRows = typeof sourceGateway.readEmployeeRoster === 'function' ?
@@ -217,6 +230,14 @@ SalaryCalculator.PayrollOrchestrator = (function () {
         });
         var selectedById = Object.create(null), directoryById = Object.create(null);
         inputs.forEach(function (employee) { selectedById[employee.employeeId] = employee; });
+        referralIdentityIssues.forEach(function (problem) {
+          var referrer = selectedById[problem.referrerEmployeeId];
+          if (!referrer) return;
+          referralUnavailable = true;
+          errors.push(issue('REFERRAL_SOURCE_UNAVAILABLE', 'A referred employee identity cannot be verified.',
+            referrer.department, { employeeId: referrer.employeeId,
+              sourceDepartment: problem.sourceDepartment, cause: problem.cause }));
+        });
         referralInputs.forEach(function (employee) {
           (directoryById[employee.employeeId] || (directoryById[employee.employeeId] = [])).push(employee);
         });

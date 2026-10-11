@@ -402,22 +402,24 @@ test('attendance before an employee joined is not coverage for the employment wi
 function referralFixture(options = {}) {
   const base = fixture();
   const employeeColumns = { employeeId: 'ID', americanName: 'Name', firstWorkingDay: 'Joined',
-    lastWorkingDay: 'Left', finalPayrollPaymentDate: 'Final Paid', referrerEmployeeId: 'Referrer', transfers: 'Transfers' };
+    lastWorkingDay: 'Left', finalPayrollPaymentDate: 'Final Paid', referrerEmployeeId: 'Referrer',
+    annualLeaveBalance: 'Annual Balance', transfers: 'Transfers' };
   const survey = { ...base.config, employeeColumns };
   const reservations = { ...survey, department: 'RESERVATIONS' };
-  const headers = ['ID', 'Name', 'Joined', 'Left', 'Final Paid', 'Referrer', 'Transfers'];
+  const headers = ['ID', 'Name', 'Joined', 'Left', 'Final Paid', 'Referrer', 'Annual Balance', 'Transfers'];
   function employee(values) { return { headers, values, displayValues: values.map(String), rowNumber: 2 }; }
   const referrer = employee(['EMP-001', 'Alex', options.referrerJoined || '2026-08-01',
-    options.referrerLeft || '', options.finalPaid || '', '', 0]);
-  const referred = employee(['EMP-002', 'Blair', options.referredJoined || '2026-08-02', '', '', 'EMP-001', options.referredTransfers || 0]);
+    options.referrerLeft || '', options.finalPaid || '', '', options.referrerAnnualBalance || 0, 0]);
+  const referred = employee(['EMP-002', 'Blair', options.referredJoined || '2026-08-02', '', '', 'EMP-001', 0, options.referredTransfers || 0]);
+  const unrelated = employee(['EMP-003', 'Casey', '2026-08-01', '', '', '', 0, 0]);
   return fixture({ configs: [survey, reservations], getBenefitLedger: () => options.ledger || [],
     readDepartment(config, period, unusedEmployee, attendance) {
       const isReferrer = config.department === 'SURVEY';
-      return { department: config.department, period, employeeRows: [isReferrer ? referrer : referred],
+      return { department: config.department, period, employeeRows: isReferrer && options.extraSurvey ? [referrer, unrelated] : [isReferrer ? referrer : referred],
         attendanceRows: isReferrer && options.referrerLeft ? [] : [
           { ...attendance, values: [isReferrer ? 'EMP-001' : 'EMP-002', '2026-09-01',
             !isReferrer && options.badReferralAttendance ? 'BAD_STATUS' : 'PRESENT'] }
-        ] };
+        ].concat(isReferrer && options.extraSurvey ? [{ ...attendance, values: ['EMP-003', '2026-09-01', 'PRESENT'] }] : []) };
     } });
 }
 
@@ -445,6 +447,29 @@ test('scoped referrer discovers other department roster without validating its p
   assert.equal(run.referralSourceSnapshot.RESERVATIONS.employeeRows[0].values[0], 'EMP-002');
 });
 
+test('partial All run pays a healthy referrer from a failed department roster without calculating its payroll', () => {
+  const { orchestrator } = referralFixture({ referredTransfers: 'bad-performance', badReferralAttendance: true });
+  const request = { payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['ALL'] };
+  const report = orchestrator.validateRequest(request);
+  assert.equal(report.valid, true, JSON.stringify(plain(report)));
+  assert.equal(report.failedDepartments.includes('RESERVATIONS'), true);
+  const run = orchestrator.calculateDraft({ ...request, acknowledgements: {
+    partialDepartmentsFingerprint: report.partialDepartmentsFingerprint
+  } });
+  assert.equal(run.valid, true, JSON.stringify(plain(run)));
+  assert.deepEqual(plain(run.results.map(item => item.employeeId)), ['EMP-001']);
+  assert.equal(run.results[0].components.referral.amount, 10000);
+});
+
+test('partial All run flags only the affected referrer when a failed department referral identity is invalid', () => {
+  const { orchestrator } = referralFixture({ referredJoined: 'invalid-date', extraSurvey: true });
+  const report = orchestrator.validateRequest({ payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['ALL'] });
+  assert.equal(report.valid, false);
+  assert.equal(report.errors.some(error => error.code === 'REFERRAL_SOURCE_UNAVAILABLE' &&
+    error.employeeId === 'EMP-001' && error.sourceDepartment === 'RESERVATIONS'), true);
+  assert.equal(report.errors.some(error => error.code === 'REFERRAL_SOURCE_UNAVAILABLE' && error.employeeId === 'EMP-003'), false);
+});
+
 test('unreadable cross-department referral roster blocks a selected referrer with structured error', () => {
   const { orchestrator } = referralFixture({ referredJoined: 'invalid-date' });
   const report = orchestrator.validateRequest({ payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['SURVEY'] });
@@ -456,13 +481,17 @@ test('unreadable cross-department referral roster blocks a selected referrer wit
 });
 
 test('former referrer receives one source-derived bonus only in later final-payroll period', () => {
-  const options = { referrerJoined: '2026-01-01', referrerLeft: '2026-08-15', finalPaid: '2026-09-15',
+  const options = { referrerJoined: '2026-01-01', referrerLeft: '2026-08-15', finalPaid: '2026-09-15', referrerAnnualBalance: 4,
     referredJoined: '2026-07-17' };
   const request = { payrollMonth: '2026-09', cutoffMode: 'MONTH_END', departmentScope: ['SURVEY', 'RESERVATIONS'] };
   const run = referralFixture(options).orchestrator.calculateDraft(request);
   assert.equal(run.valid, true, JSON.stringify(plain(run)));
   const former = run.results.find(item => item.employeeId === 'EMP-001');
   assert.equal(former.window, null);
+  assert.equal(former.finalSettlement, true);
+  for (const component of ['basic', 'abs', 'commission', 'probation', 'annualBalance', 'extraDays']) {
+    assert.equal(former.components[component].amount, 0, component);
+  }
   assert.equal(former.components.referral.amount, 10000);
   assert.equal(former.total, 10000);
   const paid = referralFixture({ ...options, ledger: [{ benefitKey: 'REFERRAL:EMP-001:EMP-002' }] }).orchestrator.calculateDraft(request);
